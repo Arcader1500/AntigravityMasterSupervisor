@@ -16,6 +16,11 @@ The underlying `agy` environment is already packaged as a tracked plugin with a 
   * Every agent inherits `GEMINI.md`, workspace rules (`config/rules/*.md`), and MCP servers (`code-review-graph`, `context7`, `daas-cd`, `sequential-thinking`, `undermind`).
   * `git commit`, `pytest`, `python`, `uv`, `npm` are allowed for autonomous execution; destructive commands (`rm`, `Remove-Item`) trigger interactive `ASK` (`ctrl+k`) prompts; `.env*` access is hard-blocked (`DENY`). Pull Request creation / merging remains gated.
 
+### 1.3: Project Status & Milestone Roadmap
+* **Milestone 1 (Foundation & Packaging) — ✅ COMPLETED:** CLI binaries (`agy-supervisor`, `agysup`), `doctor` preflight (`src/core/discovery.ts:333`), atomic `.agy/supervisor_state.json` ledger (`src/core/ledger.ts:17`), and `PtyRunner` (`src/pty/runner.ts:21`) with 54 passing tests.
+* **Milestone 2 (Interactive TUI, Live PTY Control & Passive Telemetry) — 🚧 IN PROGRESS:** Multi-panel Ink TUI (`[1]`–`[4]`), `@xterm/headless` virtual terminal, Vim/Tmux-style modal PTY keyboard lock (`i`/`Enter` to focus, `Ctrl+]` to detach), `--no-tui` raw passthrough, passive regex telemetry parser, and Git/artifact poller.
+* **Milestone 3 (Two-Tier Supervisor Intelligence & Checkpoint Gate) — ⏳ PLANNED:** `jev` reflex permission classifier (`ctrl+k`), `supervisor.md` autonomous Q&A reasoner, auto-popup escalation modal (`[E]`), and automatic 2-checkpoint `planner` $\rightarrow$ `orchestrator` PTY handoff.
+
 ---
 
 ## 2. High-Level System Architecture Diagram
@@ -25,18 +30,18 @@ flowchart TB
     %% ─────────────────────────────────────────────────────────────
     %% LAYER 1: HUMAN & TUI PRESENTATION LAYER
     %% ─────────────────────────────────────────────────────────────
-    subgraph TUI_APP["🖥️ Python Master Supervisor TUI (Textual App — Long-Running Process)"]
+    subgraph TUI_APP["🖥️ TypeScript Master Supervisor TUI (Ink + React CLI App — Long-Running Process)"]
         direction TB
         
         subgraph UI_VIEWS["Clean Multi-View / Panel TUI Layout"]
             MAIN_VIEW["📊 Main Telemetry & Activity Screen (Default View)<br/>• Active Phase, Subagent & Current Tool/Action<br/>• Elapsed Time (Total, Phase, Current Subagent)<br/>• Task Wave Progress & Git Commit Feed<br/>• Clean Activity Stream (Parsed Updates, not raw ANSI)"]
             
-            SUB_PANELS["🗂️ Switchable Panels / Modals (Hotkey-Driven)<br/>• [T] Full-Screen Live PTY Terminal (Inspect / Manual Override)<br/>• [S] Spec & Plan Markdown Viewer<br/>• [A] Supervisor & JEV Decision Audit Log<br/>• [E] Escalation Modal (Pops up only when Human needed)"]
+            SUB_PANELS["🗂️ Switchable Panels / Modals (Hotkey-Driven)<br/>• [2] Live PTY Terminal (Modal Focus: i/Enter, Detach: Ctrl+])<br/>• [3] Spec & Plan Viewer (docs/plans/ & docs/superpowers/)<br/>• [4] Supervisor & JEV Decision Audit Log<br/>• [E] Escalation Modal (Pops up only when Human needed)"]
         end
 
-        PARSER["🔍 Stream Parser & Telemetry Extractor<br/>(Extracts active subagent, tool calls, file edits, & timers from PTY)"]
+        PARSER["🔍 Stream Parser & Telemetry Extractor<br/>(Extracts active subagent, tool calls, file edits, & timers via @xterm/headless)"]
         STATE_MGR["⚙️ Lifecycle State Machine & Watchdog<br/>(Tracks stalls, retries, phase handoffs)"]
-        PTY_CTRL["🔌 PTY Process Controller (`pywinpty` / `pexpect`)<br/>(Runs `agy` in background virtual terminal)"]
+        PTY_CTRL["🔌 PTY Process Controller (node-pty: Windows ConPTY & POSIX PTY — `src/pty/runner.ts:21`)<br/>(Runs `agy` in background virtual terminal)"]
         
         MAIN_VIEW <--> STATE_MGR
         SUB_PANELS <--> STATE_MGR
@@ -47,10 +52,10 @@ flowchart TB
     %% ─────────────────────────────────────────────────────────────
     %% LAYER 2: PERSISTENT WORKSPACE LEDGER
     %% ─────────────────────────────────────────────────────────────
-    subgraph DISK["💾 Workspace Persistence (`.agy/` & `docs/plans/`)"]
+    subgraph DISK["💾 Workspace Persistence (`.agy/`, `docs/plans/` & `docs/superpowers/`)"]
         LEDGER[("📄 .agy/supervisor_state.json<br/>• Original Requirements<br/>• Grilling Q&A / Assumptions<br/>• Task Progress, Timings & Retries<br/>• Permission Audit Trail")]
-        SPEC_DOC[("📐 docs/plans/*-spec.md<br/>(Checkpoint 1 Artifact)")]
-        PLAN_DOC[("📝 docs/plans/*-plan.md<br/>(Checkpoint 2 Artifact)")]
+        SPEC_DOC[("📐 docs/plans/*-spec.md or docs/superpowers/specs/*-design.md<br/>(Checkpoint 1 Artifact)")]
+        PLAN_DOC[("📝 docs/plans/*-plan.md or docs/superpowers/plans/*-plan.md<br/>(Checkpoint 2 Artifact)")]
     end
 
     STATE_MGR <--> LEDGER
@@ -105,7 +110,7 @@ flowchart TB
     %% OPEN DESIGN DECISIONS (ANNOTATED IN ARCHITECTURE)
     %% ─────────────────────────────────────────────────────────────
     subgraph OPEN_DECISIONS["❓ Open Design Decisions (To Be Finalized)"]
-        OD1["[OD-1] PTY Stream Detection:<br/>Pure `jev` classification vs. Regex/Sentinel tokens<br/>for detecting when `planner` finishes speaking?"]
+        OD1["[OD-1] PTY Stream Detection (RESOLVED — M2):<br/>Pure Passive Regex Parsing against @xterm/headless<br/>+ workspace polling (no sentinels needed)"]
         OD2["[OD-2] Spec Checkpoint Authority:<br/>Always pause for Human sign-off on `spec.md`,<br/>or allow `supervisor.md` to auto-approve routine specs?"]
         OD3["[OD-3] `supervisor.md` Context Strategy:<br/>Stateless single-turn calls (fed `supervisor_state.json`)<br/>vs. `--resume` persistent session?"]
         OD4["[OD-4] Blocked Task Recovery:<br/>When `implementer` returns `BLOCKED` or fails 3x,<br/>can Supervisor amend `plan.md` or must it re-invoke `planner`?"]
@@ -163,8 +168,8 @@ Focuses purely on **what is running right now, how long it has been running, and
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### What the Python PTY Stream Parser Extracts Automatically
-By reading the virtual terminal buffer (`pyte`) and polling lightweight workspace state, the Python controller extracts structured telemetry without needing extra LLM calls:
+### What the TypeScript PTY Stream Parser Extracts Automatically
+By reading the virtual terminal buffer (`@xterm/headless (Virtual Terminal Buffer)`) and polling lightweight workspace state, the TypeScript controller extracts structured telemetry without needing extra LLM calls:
 1. **Active Agent & Subagent Detection:** Matches `invoke_subagent` calls and `SYSTEM_MESSAGE: DONE / BLOCKED` markers in the PTY stream to know exactly which subagent (`researcher`, `plan-critic`, `implementer`, `code-reviewer`, `verifier`) is active.
 2. **Execution Timers:** Tracks wall-clock time for the overall run, current lifecycle phase, and active subagent turn (resetting the stall watchdog whenever new bytes arrive from the PTY).
 3. **Current Tool / File Touch Tracking:** Parses tool call headers (`edit_file`, `write_to_file`, `run_command`, MCP calls) from the `agy` output stream to show the exact file or command currently being processed.
@@ -172,8 +177,8 @@ By reading the virtual terminal buffer (`pyte`) and polling lightweight workspac
 
 ### Switchable Panels & On-Demand Modals
 * **`[1]` Main Status Screen:** The clean telemetry view above.
-* **`[2]` Live PTY Terminal Panel:** Full-screen interactive view of the underlying `agy` session. You can watch the raw output or press `i` to type directly into `agy` if you want to intervene manually.
-* **`[3]` Spec & Plan Reader:** Renders the current `docs/plans/*-spec.md` and `*-plan.md` in a scrollable Markdown viewer.
+* **`[2]` Live PTY Terminal Panel:** Full-screen interactive view of the underlying `agy` session with **Modal PTY Interaction**: press `i` or `Enter` on Tab `[2]` (or `t` globally) to lock keyboard input into `agy`, and `Ctrl+]` to detach back to TUI tab navigation.
+* **`[3]` Spec & Plan Reader:** Renders the current spec and plan documents (`docs/plans/*-spec.md` / `docs/superpowers/specs/*-design.md` and `docs/plans/*-plan.md` / `docs/superpowers/plans/*-plan.md`) in a scrollable Markdown viewer.
 * **`[4]` Supervisor & `jev` Audit Log:** Detailed table of every grilling question answered by `supervisor.md`, assumptions logged, and `ctrl+k` permissions approved by `jev`.
 * **🚨 Auto-Popup Escalation Modal:** Whenever human input is required (a product question during Grilling, Spec sign-off at Checkpoint 1, or a dangerous command), a modal dialog pops up over the screen and rings the terminal bell so you never have to hunt for prompts.
 
@@ -232,10 +237,10 @@ stateDiagram-v2
 
 ## 5. Open Design Decisions (To Resolve During Build)
 
-| ID | Decision Area | Option A | Option B | Trade-off to Weigh |
+| ID | Decision Area | Option A / Resolution | Option B | Trade-off / Note |
 | :--- | :--- | :--- | :--- | :--- |
-| **OD-1** | **Turn-Completion & Telemetry Parsing in PTY** | **Structured Status Markers:** Instruct `planner` and `orchestrator` (via prompt/skill) to print lightweight lines like `[AGY:PHASE=SPEC_READY]` or `[AGY:TASK=2/5]`. | **Pure Regex + `jev` Parsing:** Parse `agy`'s existing tool-call UI box headers via regex and let `jev` classify pauses. | Adding 2–3 sentinel tags to agent prompts makes the TUI's progress bar and phase detection 100% rock-solid. |
+| **OD-1** | **Turn-Completion & Telemetry Parsing in PTY** | **RESOLVED (Milestone 2):** Pure Passive Regex Parsing against `@xterm/headless` terminal lines + workspace artifact polling (no sentinel tags required). | *(Superseded: Structured Status Markers)* | Pure passive extraction avoids invasive prompt modifications or sentinel tag dependencies. |
 | **OD-2** | **Checkpoint 1 (`spec.md`) Approval Policy** | **Always Human-Gated:** The TUI always pops up the Spec Review modal at Checkpoint 1 and asks the user to click `[Approve Spec]` before `writing-plans` starts. | **Confidence-Based:** `supervisor.md` auto-approves small/unambiguous specs and only pauses for human review if escalated questions occurred. | Always gating the Spec costs 30 seconds of human reading but guarantees `orchestrator` never builds the wrong design. |
 | **OD-3** | **`supervisor.md` Invocation Mode** | **Stateless + Ledger Injection:** Every call to `agy --agent supervisor -p "..."` is a fresh one-shot call that reads `.agy/supervisor_state.json`. | **Resumed Session:** Use `agy`'s session resume flag so `supervisor.md` keeps conversational memory across the run. | Stateless + Ledger is immune to context compaction and crashes; Resumed Session avoids re-reading files. |
 | **OD-4** | **Handling Mid-Implementation Blockers** | **Escalate Immediately:** If `orchestrator` reports `BLOCKED` or fails verification 3 times on a task, pause PTY #2 and alert the human in TUI. | **Supervisor Triage First:** Wake up `supervisor.md` to inspect the failure diff and give `orchestrator` one tactical hint before bothering the human. | Triage first can resolve simple environment/import hiccups autonomously without waking the user. |
-| **OD-5** | **Windows vs. Cross-Platform PTY Backend** | **`pywinpty` (Windows ConPTY native):** Best compatibility with Windows PowerShell/`Get-ChildItem` environments. | **`wexpect` / `pexpect` abstraction:** Unified API if running across WSL/Linux and native Windows. | Depends on whether you run `agy` natively in Windows PowerShell/Terminal or inside WSL2. |
+| **OD-5** | **Windows vs. Cross-Platform PTY Backend** | **RESOLVED (Milestone 1):** `node-pty` with `useConpty: true` on Windows (`src/pty/runner.ts:95-97`). | *(Superseded: `pywinpty` / `pexpect`)* | Unified `node-pty` backend across Windows (ConPTY native) and POSIX systems in TypeScript. |
