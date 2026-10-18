@@ -1,0 +1,39 @@
+{
+  "name": "antigravity-master-supervisor",
+  "version": "0.1.0",
+  "description": "Master Supervisor CLI for Antigravity AI agent orchestration",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "agy-supervisor": "./bin/agy-supervisor.js",
+    "agysup": "./bin/agy-supervisor.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "dev": "tsup --watch"
+  },
+  "dependencies": {
+    "colorette": "^2.0.20",
+    "commander": "^12.0.0",
+    "node-pty": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  }
+}
