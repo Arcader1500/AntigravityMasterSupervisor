@@ -160,6 +160,46 @@ describe('PtyRunner', () => {
       expect(exitCode).toBe(0);
       expect(output).toContain('PTY_LIVE_SUCCESS');
     });
+
+    it('returns numeric PID and isProcessRunning=true during live spawn, and undefined/false when not running', async () => {
+      const runner = new PtyRunner({
+        projectDir: process.cwd(),
+        binaryPath: process.execPath,
+        agent: '',
+        args: ['-e', 'setTimeout(() => process.exit(0), 100);'],
+        dryRun: false,
+      });
+
+      expect(runner.getPid()).toBeUndefined();
+      expect(runner.isProcessRunning()).toBe(false);
+
+      const runPromise = runner.start();
+      expect(runner.isProcessRunning()).toBe(true);
+      expect(typeof runner.getPid()).toBe('number');
+      expect(runner.getPid()).toBeGreaterThan(0);
+
+      const exitCode = await runPromise;
+      expect(exitCode).toBe(0);
+      expect(runner.isProcessRunning()).toBe(false);
+      expect(runner.getPid()).toBeUndefined();
+    });
+
+    it('returns undefined PID and isProcessRunning=false for dry-run', async () => {
+      const runner = new PtyRunner({
+        projectDir: process.cwd(),
+        binaryPath: 'agy',
+        agent: 'planner',
+        dryRun: true,
+      });
+
+      expect(runner.getPid()).toBeUndefined();
+      expect(runner.isProcessRunning()).toBe(false);
+
+      const exitCode = await runner.start();
+      expect(exitCode).toBe(0);
+      expect(runner.getPid()).toBeUndefined();
+      expect(runner.isProcessRunning()).toBe(false);
+    });
   });
 
   describe('error handling and remediation', () => {

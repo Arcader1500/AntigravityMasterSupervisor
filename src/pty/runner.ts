@@ -42,6 +42,20 @@ export class PtyRunner {
   }
 
   /**
+   * Returns the operating system process ID of the running PTY process, or undefined if not active.
+   */
+  getPid(): number | undefined {
+    return this.ptyProcess?.pid;
+  }
+
+  /**
+   * Returns true if the PTY process is currently active/running.
+   */
+  isProcessRunning(): boolean {
+    return this.isRunning;
+  }
+
+  /**
    * Subscribes a listener to receive raw output stream chunks from the PTY.
    */
   onData(callback: DataListener): void {
