@@ -2,6 +2,9 @@ import { red } from 'colorette';
 import { resolveTargetDir, findAgyBinary } from '../../core/discovery.js';
 import { initLedger, updateLedger } from '../../core/ledger.js';
 import { PtyRunner } from '../../pty/runner.js';
+import { attachRawPassthrough } from '../../pty/raw-passthrough.js';
+import type { RawPassthroughHandle } from '../../pty/types.js';
+import { mountSupervisorTui, type SupervisorTuiInstance } from '../../tui/index.js';
 
 export interface RunOptions {
   agyBin?: string;
@@ -10,6 +13,9 @@ export interface RunOptions {
   verbose?: boolean;
   cols?: number;
   rows?: number;
+  noTui?: boolean;
+  forceTui?: boolean;
+  args?: string[];
 }
 
 /**
@@ -39,17 +45,60 @@ export async function runCommand(
     projectDir,
     agent: options?.agent ?? '',
     binaryPath: agyResult.path ?? (options?.dryRun ? 'agy' : ''),
+    args: options?.args,
     dryRun: options?.dryRun ?? false,
     cols: options?.cols ?? (process.stdout.columns || 80),
     rows: options?.rows ?? (process.stdout.rows || 30),
   });
 
-  // Stream PTY output directly to stdout
-  ptyRunner.onData((data: string) => {
-    process.stdout.write(data);
-  });
+  const isInteractiveTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const useTui =
+    options?.forceTui ?? (isInteractiveTty && !options?.noTui && !options?.dryRun);
+
+  let tuiInstance: SupervisorTuiInstance | undefined;
+  let passthroughHandle: RawPassthroughHandle | undefined;
+
+  if (useTui) {
+    tuiInstance = mountSupervisorTui({
+      projectDir,
+      ptyRunner,
+      mainAgent: options?.agent || 'agy',
+    });
+  } else {
+    // Stream PTY output directly to stdout
+    ptyRunner.onData((data: string) => {
+      process.stdout.write(data);
+    });
+
+    if (isInteractiveTty && !options?.dryRun) {
+      passthroughHandle = attachRawPassthrough(ptyRunner);
+    }
+  }
 
   const cleanup = () => {
+    if (passthroughHandle) {
+      try {
+        passthroughHandle.detach();
+      } catch {
+        // Safe to ignore detach errors
+      }
+      passthroughHandle = undefined;
+    }
+    if (tuiInstance) {
+      try {
+        tuiInstance.unmount();
+      } catch {
+        // Safe to ignore unmount errors
+      }
+      tuiInstance = undefined;
+    }
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        // Safe to ignore
+      }
+    }
     try {
       ptyRunner.kill();
     } catch {
@@ -132,5 +181,29 @@ export async function runCommand(
   } finally {
     process.removeListener('SIGINT', sigintHandler);
     process.removeListener('SIGTERM', sigtermHandler);
+    if (passthroughHandle) {
+      try {
+        passthroughHandle.detach();
+      } catch {
+        // Safe to ignore detach errors
+      }
+      passthroughHandle = undefined;
+    }
+    if (tuiInstance) {
+      try {
+        tuiInstance.unmount();
+      } catch {
+        // Safe to ignore unmount errors
+      }
+      tuiInstance = undefined;
+    }
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        // Safe to ignore
+      }
+    }
   }
 }
+

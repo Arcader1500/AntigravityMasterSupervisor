@@ -5,6 +5,8 @@ import * as os from 'node:os';
 import { createCliProgram } from '../../src/cli/index.js';
 import * as doctorModule from '../../src/cli/commands/doctor.js';
 import * as runModule from '../../src/cli/commands/run.js';
+import * as tuiModule from '../../src/tui/index.js';
+import * as rawPassthroughModule from '../../src/pty/raw-passthrough.js';
 import { loadLedger } from '../../src/core/ledger.js';
 import { PtyRunner } from '../../src/pty/runner.js';
 
@@ -42,6 +44,8 @@ describe('CLI Parser', () => {
       const program = createCliProgram();
       const optionNames = program.options.map((opt) => opt.long);
       expect(optionNames).toContain('--agy-bin');
+      expect(optionNames).toContain('--agent');
+      expect(optionNames).toContain('--no-tui');
       expect(optionNames).toContain('--dry-run');
       expect(optionNames).toContain('--verbose');
 
@@ -57,6 +61,7 @@ describe('CLI Parser', () => {
       const runOpts = runCmd!.options.map((opt) => opt.long);
       expect(runOpts).toContain('--agy-bin');
       expect(runOpts).toContain('--agent');
+      expect(runOpts).toContain('--no-tui');
       expect(runOpts).toContain('--dry-run');
       expect(runOpts).toContain('--verbose');
     });
@@ -127,6 +132,49 @@ describe('CLI Parser', () => {
       expect(targetDirArg).toBe(tempBaseDir);
       expect(optionsArg).toMatchObject({
         dryRun: true,
+      });
+    });
+
+    it('passes { noTui: true, agent: "planner" } to runCommand when --no-tui and --agent are passed to root program', async () => {
+      const runSpy = vi.spyOn(runModule, 'runCommand').mockResolvedValue(undefined);
+      const program = createCliProgram();
+
+      await program.parseAsync([
+        'node',
+        'agy-supervisor',
+        '--no-tui',
+        '--agent',
+        'planner',
+      ]);
+
+      expect(runSpy).toHaveBeenCalledTimes(1);
+      const [, optionsArg] = runSpy.mock.calls[0];
+      expect(optionsArg).toMatchObject({
+        noTui: true,
+        agent: 'planner',
+      });
+    });
+
+    it('passes { noTui: true, agent: "planner" } to runCommand when explicit run subcommand is used', async () => {
+      const runSpy = vi.spyOn(runModule, 'runCommand').mockResolvedValue(undefined);
+      const program = createCliProgram();
+
+      await program.parseAsync([
+        'node',
+        'agy-supervisor',
+        'run',
+        tempBaseDir,
+        '--no-tui',
+        '--agent',
+        'planner',
+      ]);
+
+      expect(runSpy).toHaveBeenCalledTimes(1);
+      const [targetDirArg, optionsArg] = runSpy.mock.calls[0];
+      expect(targetDirArg).toBe(tempBaseDir);
+      expect(optionsArg).toMatchObject({
+        noTui: true,
+        agent: 'planner',
       });
     });
   });
@@ -246,6 +294,65 @@ describe('CLI Parser', () => {
       await runPromise;
       onSpy.mockRestore();
       exitSpy.mockRestore();
+    });
+
+    it('mounts supervisor TUI when forceTui is enabled and unmounts on completion', async () => {
+      const unmountSpy = vi.fn();
+      const mountSpy = vi.spyOn(tuiModule, 'mountSupervisorTui').mockReturnValue({
+        unmount: unmountSpy,
+        waitUntilExit: vi.fn().mockResolvedValue(undefined),
+        store: {} as any,
+        virtualTerminal: {} as any,
+      });
+
+      await runModule.runCommand(tempBaseDir, {
+        dryRun: true,
+        forceTui: true,
+        agent: 'tui-bot',
+      });
+
+      expect(mountSpy).toHaveBeenCalledTimes(1);
+      expect(mountSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectDir: tempBaseDir,
+          mainAgent: 'tui-bot',
+        })
+      );
+      expect(unmountSpy).toHaveBeenCalledTimes(1);
+      mountSpy.mockRestore();
+    });
+
+    it('attaches and detaches raw passthrough when interactive TTY is detected in non-TUI mode', async () => {
+      const origStdinIsTTY = process.stdin.isTTY;
+      const origStdoutIsTTY = process.stdout.isTTY;
+      const origSetRawMode = process.stdin.setRawMode;
+
+      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+      Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+      const setRawModeSpy = vi.fn();
+      (process.stdin as any).setRawMode = setRawModeSpy;
+
+      const detachSpy = vi.fn();
+      const passthroughSpy = vi
+        .spyOn(rawPassthroughModule, 'attachRawPassthrough')
+        .mockReturnValue({ detach: detachSpy });
+
+      const startSpy = vi.spyOn(PtyRunner.prototype, 'start').mockResolvedValue(0);
+
+      await runModule.runCommand(tempBaseDir, {
+        agyBin: process.execPath,
+        noTui: true,
+      });
+
+      expect(passthroughSpy).toHaveBeenCalledTimes(1);
+      expect(detachSpy).toHaveBeenCalledTimes(1);
+      expect(setRawModeSpy).toHaveBeenCalledWith(false);
+
+      startSpy.mockRestore();
+      passthroughSpy.mockRestore();
+      Object.defineProperty(process.stdin, 'isTTY', { value: origStdinIsTTY, configurable: true });
+      Object.defineProperty(process.stdout, 'isTTY', { value: origStdoutIsTTY, configurable: true });
+      (process.stdin as any).setRawMode = origSetRawMode;
     });
   });
 });
