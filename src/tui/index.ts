@@ -82,11 +82,11 @@ const SupervisorTuiContainer: React.FC<SupervisorTuiContainerProps> = ({
   useEffect(() => {
     const unsubscribe = store.subscribe(() => {
       setSnapshot(store.getSnapshot());
-      setLedger(loadLedger(projectDir));
     });
 
     const timer = setInterval(() => {
       setSnapshot(store.getSnapshot());
+      setLedger(loadLedger(projectDir));
     }, 1000);
 
     return () => {
@@ -94,6 +94,10 @@ const SupervisorTuiContainer: React.FC<SupervisorTuiContainerProps> = ({
       clearInterval(timer);
     };
   }, [store, projectDir]);
+
+  useEffect(() => {
+    setLedger(loadLedger(projectDir));
+  }, [forceNavSignal, projectDir]);
 
   return React.createElement(App, {
     snapshot,
@@ -122,8 +126,9 @@ export function mountSupervisorTui(
   });
 
   options.ptyRunner.onData((chunk) => {
-    void virtualTerminal.write(chunk);
-    store.notify();
+    void virtualTerminal.write(chunk).then(() => {
+      store.notify();
+    });
   });
 
   const handleResize = () => {
@@ -178,12 +183,18 @@ export function mountSupervisorTui(
     exitPromiseResolve();
   };
 
+  const onWritePty = (data: string) => {
+    parser.clearWaitingForInput();
+    store.notify();
+    options.ptyRunner.write(data);
+  };
+
   const rerenderContainer = () => {
     inkInstance.rerender(
       React.createElement(SupervisorTuiContainer, {
         store,
         projectDir: options.projectDir,
-        onWritePty: (data: string) => options.ptyRunner.write(data),
+        onWritePty,
         onRequestQuit: cleanup,
         initialPanel: options.initialPanel,
         initialInputMode: options.initialInputMode,
@@ -209,7 +220,7 @@ export function mountSupervisorTui(
     React.createElement(SupervisorTuiContainer, {
       store,
       projectDir: options.projectDir,
-      onWritePty: (data: string) => options.ptyRunner.write(data),
+      onWritePty,
       onRequestQuit: cleanup,
       initialPanel: options.initialPanel,
       initialInputMode: options.initialInputMode,

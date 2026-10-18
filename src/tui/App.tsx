@@ -89,17 +89,17 @@ export const App: React.FC<AppProps> = ({
   }, [setRawMode]);
 
   useLayoutEffect(() => {
-    const handleScrollUp = () => {
+    const handleScrollUp = (lines: number = 1) => {
       if (activePanelRef.current === 3 || activePanelRef.current === 4) {
-        const next = Math.max(0, scrollOffsetRef.current - 1);
+        const next = Math.max(0, scrollOffsetRef.current - lines);
         scrollOffsetRef.current = next;
         setScrollOffset(next);
       }
     };
 
-    const handleScrollDown = () => {
+    const handleScrollDown = (lines: number = 1) => {
       if (activePanelRef.current === 3 || activePanelRef.current === 4) {
-        const next = scrollOffsetRef.current + 1;
+        const next = scrollOffsetRef.current + lines;
         scrollOffsetRef.current = next;
         setScrollOffset(next);
       }
@@ -129,9 +129,20 @@ export const App: React.FC<AppProps> = ({
     const handleNavInput = (input: string) => {
       let i = 0;
       while (i < input.length) {
-        // Handle ANSI escape sequence for arrow keys
+        // Handle ANSI escape sequence for arrow keys and PageUp/PageDown
         if (input.charCodeAt(i) === 0x1b) {
           const rest = input.slice(i);
+          const pageMatch = rest.match(/^\x1b\[([56])~/);
+          if (pageMatch) {
+            if (pageMatch[1] === '5') {
+              handleScrollUp(10);
+            } else if (pageMatch[1] === '6') {
+              handleScrollDown(10);
+            }
+            i += pageMatch[0].length;
+            continue;
+          }
+
           const arrowMatch = rest.match(/^\x1b(?:\[|O)([A-D])/);
           if (arrowMatch) {
             const code = arrowMatch[1];

@@ -157,6 +157,26 @@ describe('MainStatusView component', () => {
     expect(frame).toContain('Read src/routes.ts');
   });
 
+  it('formats ISO timestamps to compact HH:MM:SS format in activity feed', () => {
+    const isoSnapshot: TelemetrySnapshot = {
+      ...mockSnapshot,
+      activityFeed: [
+        {
+          id: 'iso-1',
+          timestamp: '2026-10-18T14:28:10.123Z',
+          actor: 'GIT',
+          message: 'Commit 123456: Fix bug',
+        },
+      ],
+    };
+    const { lastFrame } = render(<MainStatusView snapshot={isoSnapshot} />);
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('14:28:10');
+    expect(frame).not.toContain('2026-10-18T');
+    expect(frame).toContain('[GIT]');
+    expect(frame).toContain('Commit 123456: Fix bug');
+  });
+
   it('handles empty task list and empty feed gracefully', () => {
     const emptySnapshot: TelemetrySnapshot = {
       ...mockSnapshot,

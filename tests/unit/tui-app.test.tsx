@@ -222,6 +222,74 @@ describe('TUI App & Modal Input Router', () => {
     expect(lastFrame()).toContain('Spec line 1');
   });
 
+  it('scrolls SpecPlanView and AuditLogView with PageUp and PageDown by 10 lines', () => {
+    const onWritePty = vi.fn();
+    const onRequestQuit = vi.fn();
+
+    const longSpecSnapshot: TelemetrySnapshot = {
+      ...sampleSnapshot,
+      specContent: Array.from({ length: 50 }, (_, i) => `Spec line ${i + 1}`).join('\n'),
+    };
+
+    const { stdin, lastFrame } = render(
+      <App
+        snapshot={longSpecSnapshot}
+        ledger={sampleLedger}
+        onWritePty={onWritePty}
+        onRequestQuit={onRequestQuit}
+        initialPanel={3}
+      />
+    );
+
+    expect(lastFrame()).toContain('Spec line 1');
+
+    // PageDown scrolls down by 10 lines (\x1b[6~)
+    stdin.write('\x1b[6~');
+    expect(lastFrame()).toContain('Spec line 11');
+
+    // PageDown scrolls down another 10 lines
+    stdin.write('\x1b[6~');
+    expect(lastFrame()).toContain('Spec line 21');
+
+    // PageUp scrolls up by 10 lines (\x1b[5~)
+    stdin.write('\x1b[5~');
+    expect(lastFrame()).toContain('Spec line 11');
+
+    // PageUp scrolls back to top
+    stdin.write('\x1b[5~');
+    expect(lastFrame()).toContain('Spec line 1');
+
+    // PageUp at 0 does not underflow
+    stdin.write('\x1b[5~');
+    expect(lastFrame()).toContain('Spec line 1');
+
+    // Test on Panel 4 (AuditLogView)
+    const longLedger: SupervisorLedger = {
+      ...sampleLedger,
+      events: Array.from({ length: 50 }, (_, i) => ({
+        timestamp: '10:00:00',
+        level: 'INFO' as const,
+        message: `Audit event ${i + 1}`,
+      })),
+    };
+
+    const { stdin: stdin4, lastFrame: lastFrame4 } = render(
+      <App
+        snapshot={sampleSnapshot}
+        ledger={longLedger}
+        onWritePty={onWritePty}
+        onRequestQuit={onRequestQuit}
+        initialPanel={4}
+      />
+    );
+
+    expect(lastFrame4()).toContain('Audit event 1');
+    stdin4.write('\x1b[6~');
+    expect(lastFrame4()).toContain('Audit event 11');
+    stdin4.write('\x1b[5~');
+    expect(lastFrame4()).toContain('Audit event 1');
+  });
+
   it('invokes onRequestQuit when "q", "Q", or Ctrl+C is pressed in NAVIGATION mode', () => {
     const onWritePty = vi.fn();
     const onRequestQuit = vi.fn();
@@ -347,6 +415,40 @@ describe('mountSupervisorTui integration', () => {
     expect(tui.virtualTerminal.getRows()).toBeGreaterThanOrEqual(10);
 
     // Clean unmount
+    tui.unmount();
+    await tui.waitUntilExit();
+  });
+
+  it('updates virtualTerminal and store when ptyRunner emits data', async () => {
+    let capturedDataListener: ((chunk: string) => void) | undefined;
+    const mockPtyRunner = {
+      onData: vi.fn((listener: (chunk: string) => void) => {
+        capturedDataListener = listener;
+      }),
+      onExit: vi.fn(),
+      write: vi.fn(),
+      resize: vi.fn(),
+      isProcessRunning: vi.fn(() => false),
+      kill: vi.fn(),
+      getPid: vi.fn(() => 4567),
+    } as unknown as PtyRunner;
+
+    const tui = mountSupervisorTui({
+      projectDir: tempDir,
+      ptyRunner: mockPtyRunner,
+      mainAgent: 'planner',
+    });
+
+    expect(capturedDataListener).toBeDefined();
+
+    const notifySpy = vi.spyOn(tui.store, 'notify');
+    capturedDataListener!('test output from pty\r\n');
+
+    // Wait for virtualTerminal.write promise to resolve
+    await new Promise((r) => setTimeout(r, 50));
+    expect(notifySpy).toHaveBeenCalled();
+    expect(tui.virtualTerminal.getViewportLines().join(' ')).toContain('test output from pty');
+
     tui.unmount();
     await tui.waitUntilExit();
   });

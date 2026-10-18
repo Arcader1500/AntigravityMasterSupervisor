@@ -119,7 +119,11 @@ export const MainStatusView: React.FC<MainStatusViewProps> = ({ snapshot }) => {
             ) : (
               snapshot.activityFeed.slice(-15).map((item) => (
                 <Box key={item.id} flexDirection="row">
-                  <Text color="gray">{item.timestamp} </Text>
+                  <Text color="gray">
+                    {item.timestamp.includes('T')
+                      ? item.timestamp.slice(11, 19)
+                      : item.timestamp}{' '}
+                  </Text>
                   <Text bold color="blue">
                     [{item.actor.toUpperCase()}]{' '}
                   </Text>
