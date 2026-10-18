@@ -1,11 +1,19 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import { spawnSync, execSync } from 'node:child_process';
 import { createCliProgram } from '../../src/index.js';
 
 describe('Doctor Integration', () => {
   let consoleSpy: any;
   const originalExitCode = process.exitCode;
+
+  beforeAll(() => {
+    const distCli = path.resolve(process.cwd(), 'dist', 'cli', 'index.js');
+    if (!fs.existsSync(distCli)) {
+      execSync('npm run build', { stdio: 'inherit' });
+    }
+  });
 
   beforeEach(() => {
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -34,6 +42,7 @@ describe('Doctor Integration', () => {
       encoding: 'utf-8',
     });
 
+    expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Antigravity Preflight Doctor');
     expect(result.stdout).toContain('Target Directory:');

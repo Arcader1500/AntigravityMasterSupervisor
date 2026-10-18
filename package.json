@@ -31,7 +31,7 @@
     "build": "tsup",
     "test": "vitest run",
     "dev": "tsup --watch",
-    "prepublishOnly": "npm run test && npm run build"
+    "prepublishOnly": "npm run build && npm run test"
   },
   "dependencies": {
     "colorette": "^2.0.20",

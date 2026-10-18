@@ -53,6 +53,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build bundles
+        run: npm run build
+
       - name: Check version against npm registry
         id: check_npm
         env:
@@ -104,6 +107,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build bundles
+        run: npm run build
 
       - name: Check version against GitHub Packages
         id: check_gpr
