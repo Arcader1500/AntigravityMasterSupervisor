@@ -88,7 +88,7 @@ describe('Discovery Preflight', () => {
   describe('findAgyBinary', () => {
     it('prefers explicit binary override when provided and file exists', () => {
       const mockBin = path.join(tempBaseDir, 'mock-bin-path');
-      fs.writeFileSync(mockBin, 'mock content');
+      fs.writeFileSync(mockBin, 'mock content', { mode: 0o755 });
       const bin = findAgyBinary(mockBin);
       expect(bin.path).toBe(mockBin);
       expect(bin.source).toBe('override');
@@ -103,7 +103,7 @@ describe('Discovery Preflight', () => {
     it('falls back to AGY_BIN_PATH when no override is given and env file exists', () => {
       delete process.env.AGY_BIN_PATH;
       const envBin = path.join(tempBaseDir, 'env-mock-bin');
-      fs.writeFileSync(envBin, 'mock content');
+      fs.writeFileSync(envBin, 'mock content', { mode: 0o755 });
       process.env.AGY_BIN_PATH = envBin;
       const bin = findAgyBinary();
       expect(bin.path).toBe(envBin);

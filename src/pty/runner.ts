@@ -1,3 +1,5 @@
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import * as nodePty from 'node-pty';
 import type { IPty } from 'node-pty';
 import type {
@@ -133,6 +135,41 @@ export class PtyRunner {
     return new Promise<number>((resolve, reject) => {
       try {
         const config = this.resolveSpawnConfig();
+        const isWin = process.platform === 'win32';
+
+        if (!this.options.dryRun && config.file) {
+          const file = config.file;
+          const isExplicitPath = path.isAbsolute(file) || file.includes('/') || file.includes('\\');
+          let exists = false;
+          if (isExplicitPath) {
+            exists = fs.existsSync(file);
+          } else {
+            const pathEnv = process.env.PATH || process.env.Path || '';
+            const extensions = isWin ? ['', '.cmd', '.exe', '.bat', '.ps1'] : [''];
+            exists = pathEnv.split(path.delimiter).some((dir) =>
+              extensions.some((ext) => {
+                try {
+                  return fs.existsSync(path.join(dir, `${file}${ext}`));
+                } catch {
+                  return false;
+                }
+              })
+            );
+          }
+
+          if (!exists) {
+            const formattedError = new Error(
+              isWin
+                ? `Failed to spawn PTY with ConPTY on Windows: File not found: ${file}. Ensure Windows 10/11 (build >= 18309) or install Visual Studio C++ runtime and build tools.`
+                : `Failed to spawn PTY: File not found: ${file}.`
+            );
+            this.isRunning = false;
+            this.ptyProcess = null;
+            reject(formattedError);
+            return;
+          }
+        }
+
         this.ptyProcess = spawnPty(config.file, config.args, config.options);
         this.isRunning = true;
 
