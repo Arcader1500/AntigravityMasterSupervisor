@@ -1,10 +1,17 @@
 {
-  "name": "antigravity-master-supervisor",
+  "name": "@arcader1500/antigravity-master-supervisor",
   "version": "0.1.0",
   "description": "Master Supervisor CLI for Antigravity AI agent orchestration",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arcader1500/AntigravityMasterSupervisor.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "agy-supervisor": "./bin/agy-supervisor.js",
     "agysup": "./bin/agy-supervisor.js"
@@ -23,7 +30,8 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "prepublishOnly": "npm run test && npm run build"
   },
   "dependencies": {
     "colorette": "^2.0.20",

@@ -12,14 +12,22 @@ Master Supervisor CLI tool (`agy-supervisor` / `agysup`) for Antigravity AI agen
 
 ## Installation
 
-### Global Installation
+### From npm Registry
+
 ```bash
-npm install -g antigravity-master-supervisor
+# Global CLI installation
+npm install -g @arcader1500/antigravity-master-supervisor
+
+# Local project installation
+npm install @arcader1500/antigravity-master-supervisor
 ```
 
-### Local / Project Installation
+### From GitHub Packages
+
 ```bash
-npm install antigravity-master-supervisor
+# Configure npm to use GitHub Packages for the @arcader1500 scope:
+# npm config set @arcader1500:registry https://npm.pkg.github.com
+npm install -g @arcader1500/antigravity-master-supervisor
 ```
 
 ## CLI Usage

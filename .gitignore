@@ -2,4 +2,5 @@ node_modules/
 dist/
 .agy/
 *.log
+*.tgz
 .code-review-graph/
