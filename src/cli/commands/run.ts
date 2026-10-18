@@ -1,6 +1,6 @@
 import { red } from 'colorette';
 import { resolveTargetDir, findAgyBinary } from '../../core/discovery.js';
-import { initLedger, updateLedger, appendLedgerEvent } from '../../core/ledger.js';
+import { initLedger, updateLedger } from '../../core/ledger.js';
 import { PtyRunner } from '../../pty/runner.js';
 
 export interface RunOptions {
@@ -32,11 +32,6 @@ export async function runCommand(
       )
     );
     process.exitCode = 1;
-    if (process.env.VITEST && typeof (process.exit as any).mock !== 'undefined') {
-      process.exit(1);
-    } else if (!process.env.VITEST) {
-      process.exit(1);
-    }
     return;
   }
 
@@ -64,8 +59,12 @@ export async function runCommand(
       updateLedger(projectDir, (ledger) => {
         ledger.status = 'IDLE';
         ledger.activeAgent = null;
+        ledger.events.push({
+          timestamp: new Date().toISOString(),
+          level: 'INFO',
+          message: 'Supervisor execution interrupted by signal',
+        });
       });
-      appendLedgerEvent(projectDir, 'INFO', 'Supervisor execution interrupted by signal');
     } catch {
       // Safe to ignore ledger errors on shutdown
     }
@@ -73,12 +72,7 @@ export async function runCommand(
 
   const handleSignal = (signalCode: number) => {
     cleanup();
-    process.exitCode = signalCode;
-    if (process.env.VITEST && typeof (process.exit as any).mock !== 'undefined') {
-      process.exit(signalCode);
-    } else if (!process.env.VITEST) {
-      process.exit(signalCode);
-    }
+    process.exit(signalCode);
   };
 
   const sigintHandler = () => handleSignal(130);
@@ -93,29 +87,48 @@ export async function runCommand(
       if (options?.agent) {
         ledger.activeAgent = options.agent;
       }
+      ledger.events.push({
+        timestamp: new Date().toISOString(),
+        level: 'INFO',
+        message: `Supervisor execution started${options?.agent ? ` for agent '${options.agent}'` : ''}`,
+        ...(options?.agent || options?.dryRun !== undefined
+          ? { metadata: { agent: options?.agent, dryRun: options?.dryRun } }
+          : {}),
+      });
     });
-    appendLedgerEvent(
-      projectDir,
-      'INFO',
-      `Supervisor execution started${options?.agent ? ` for agent '${options.agent}'` : ''}`,
-      { agent: options?.agent, dryRun: options?.dryRun }
-    );
 
     const exitCode = await ptyRunner.start();
 
     updateLedger(projectDir, (ledger) => {
       ledger.status = exitCode === 0 ? 'COMPLETED' : 'FAILED';
       ledger.activeAgent = null;
+      ledger.events.push({
+        timestamp: new Date().toISOString(),
+        level: exitCode === 0 ? 'INFO' : 'ERROR',
+        message: `Supervisor execution ended with exit code ${exitCode}`,
+      });
     });
-    appendLedgerEvent(
-      projectDir,
-      exitCode === 0 ? 'INFO' : 'ERROR',
-      `Supervisor execution ended with exit code ${exitCode}`
-    );
 
     if (exitCode !== 0) {
       process.exitCode = exitCode;
     }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(red(`[✗] Supervisor execution failed: ${message}`));
+    try {
+      updateLedger(projectDir, (ledger) => {
+        ledger.status = 'FAILED';
+        ledger.activeAgent = null;
+        ledger.events.push({
+          timestamp: new Date().toISOString(),
+          level: 'ERROR',
+          message: `Supervisor execution failed: ${message}`,
+        });
+      });
+    } catch {
+      // Safe to ignore ledger errors
+    }
+    process.exitCode = 1;
   } finally {
     process.removeListener('SIGINT', sigintHandler);
     process.removeListener('SIGTERM', sigtermHandler);

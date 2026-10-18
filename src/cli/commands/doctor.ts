@@ -23,11 +23,6 @@ export async function doctorCommand(
     console.log(bold(cyan('\n=== Antigravity Preflight Doctor ===\n')));
     console.log(`${red('[✗]')} Target Directory Error: ${message}\n`);
     process.exitCode = 1;
-    if (process.env.VITEST && typeof (process.exit as any).mock !== 'undefined') {
-      process.exit(1);
-    } else if (!process.env.VITEST) {
-      process.exit(1);
-    }
     return;
   }
 
@@ -60,7 +55,7 @@ export async function doctorCommand(
     );
   } else {
     console.log(
-      `${red('[✗]')} Antigravity Binary (agy): not found on PATH or via AGY_BIN_PATH`
+      `${red('[✗]')} Antigravity Binary (agy): not found on PATH or via AGY_BIN_PATH${report.agyBin.source === 'override' ? ' (specified --agy-bin override does not exist)' : ''}`
     );
   }
 
@@ -105,18 +100,10 @@ export async function doctorCommand(
   if (allPassed) {
     console.log(green('\nPreflight checks passed successfully.\n'));
     process.exitCode = 0;
-    if (process.env.VITEST && typeof (process.exit as any).mock !== 'undefined') {
-      process.exit(0);
-    }
   } else {
     console.log(
       red('\nPreflight checks failed. Please address the errors above.\n')
     );
     process.exitCode = 1;
-    if (process.env.VITEST && typeof (process.exit as any).mock !== 'undefined') {
-      process.exit(1);
-    } else if (!process.env.VITEST) {
-      process.exit(1);
-    }
   }
 }

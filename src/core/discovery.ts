@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import type {
   GitCheckResult,
   AgyBinaryResult,
@@ -112,10 +112,13 @@ function tryGetVersion(binPath: string): string | undefined {
     return undefined;
   }
   try {
-    const output = execSync(`"${binPath}" --version`, {
+    const isWindows = process.platform === 'win32';
+    const isScript = isWindows && /\.(cmd|bat|ps1)$/i.test(binPath);
+    const output = execFileSync(binPath, ['--version'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 2000,
+      shell: isScript,
     }).trim();
     return output || undefined;
   } catch {
@@ -124,31 +127,119 @@ function tryGetVersion(binPath: string): string | undefined {
 }
 
 /**
+ * Resolves a binary candidate string (exact path, with Windows extensions, or via PATH).
+ * Returns the valid file path if found, or null if it does not exist.
+ */
+function resolveBinaryCandidate(candidatePath: string): string | null {
+  const trimmed = candidatePath.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const isWindows = process.platform === 'win32';
+
+  // 1. Direct path check (as passed)
+  if (fs.existsSync(trimmed)) {
+    try {
+      const stat = fs.statSync(trimmed);
+      if (stat.isFile()) {
+        if (!isWindows) {
+          fs.accessSync(trimmed, fs.constants.X_OK);
+        }
+        return trimmed;
+      }
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // 2. Direct path with extensions on Windows
+  if (isWindows) {
+    const extensions = ['.cmd', '.exe', '.bat', '.ps1'];
+    for (const ext of extensions) {
+      const withExt = `${trimmed}${ext}`;
+      if (fs.existsSync(withExt)) {
+        try {
+          const stat = fs.statSync(withExt);
+          if (stat.isFile()) {
+            return withExt;
+          }
+        } catch {
+          // Continue
+        }
+      }
+    }
+  }
+
+  // 3. Search in system PATH directories
+  const pathEnv = process.env.PATH || process.env.Path || '';
+  const pathDirs = pathEnv
+    .split(path.delimiter)
+    .map((d) => d.trim())
+    .filter(Boolean);
+
+  const extensions = isWindows ? ['', '.cmd', '.exe', '.bat', '.ps1'] : [''];
+
+  for (const dir of pathDirs) {
+    for (const ext of extensions) {
+      const candidate = path.join(dir, `${trimmed}${ext}`);
+      if (fs.existsSync(candidate)) {
+        try {
+          const stat = fs.statSync(candidate);
+          if (stat.isFile()) {
+            if (!isWindows) {
+              fs.accessSync(candidate, fs.constants.X_OK);
+            }
+            return candidate;
+          }
+        } catch {
+          // Continue
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Locates the Antigravity `agy` CLI binary.
  * Priority:
  * 1. Explicit overridePath parameter
  * 2. AGY_BIN_PATH environment variable
- * 3. System PATH directories (checking .cmd, .exe, .bat on Windows)
+ * 3. System PATH directories (checking 'agy', 'antigravity' with .cmd, .exe, .bat, .ps1 on Windows)
  */
 export function findAgyBinary(overridePath?: string): AgyBinaryResult {
   if (overridePath && overridePath.trim().length > 0) {
-    const trimmed = overridePath.trim();
-    const version = tryGetVersion(trimmed);
+    const resolved = resolveBinaryCandidate(overridePath);
+    if (resolved) {
+      const version = tryGetVersion(resolved);
+      return {
+        path: resolved,
+        source: 'override',
+        ...(version ? { version } : {}),
+      };
+    }
     return {
-      path: trimmed,
+      path: null,
       source: 'override',
-      ...(version ? { version } : {}),
     };
   }
 
   const envPath = process.env.AGY_BIN_PATH;
   if (envPath && envPath.trim().length > 0) {
-    const trimmed = envPath.trim();
-    const version = tryGetVersion(trimmed);
+    const resolved = resolveBinaryCandidate(envPath);
+    if (resolved) {
+      const version = tryGetVersion(resolved);
+      return {
+        path: resolved,
+        source: 'env',
+        ...(version ? { version } : {}),
+      };
+    }
     return {
-      path: trimmed,
+      path: null,
       source: 'env',
-      ...(version ? { version } : {}),
     };
   }
 
@@ -159,27 +250,30 @@ export function findAgyBinary(overridePath?: string): AgyBinaryResult {
     .filter(Boolean);
 
   const isWindows = process.platform === 'win32';
-  const extensions = isWindows ? ['.cmd', '.exe', '.bat', ''] : [''];
+  const binaryNames = ['agy', 'antigravity'];
+  const extensions = isWindows ? ['.cmd', '.exe', '.bat', '.ps1', ''] : [''];
 
   for (const dir of pathDirs) {
-    for (const ext of extensions) {
-      const candidate = path.join(dir, `agy${ext}`);
-      if (fs.existsSync(candidate)) {
-        try {
-          const stat = fs.statSync(candidate);
-          if (stat.isFile()) {
-            if (!isWindows) {
-              fs.accessSync(candidate, fs.constants.X_OK);
+    for (const binName of binaryNames) {
+      for (const ext of extensions) {
+        const candidate = path.join(dir, `${binName}${ext}`);
+        if (fs.existsSync(candidate)) {
+          try {
+            const stat = fs.statSync(candidate);
+            if (stat.isFile()) {
+              if (!isWindows) {
+                fs.accessSync(candidate, fs.constants.X_OK);
+              }
+              const version = tryGetVersion(candidate);
+              return {
+                path: candidate,
+                source: 'path',
+                ...(version ? { version } : {}),
+              };
             }
-            const version = tryGetVersion(candidate);
-            return {
-              path: candidate,
-              source: 'path',
-              ...(version ? { version } : {}),
-            };
+          } catch {
+            // Continue searching if file cannot be accessed
           }
-        } catch {
-          // Continue searching if file cannot be accessed
         }
       }
     }

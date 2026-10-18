@@ -6,6 +6,7 @@ import { createCliProgram } from '../../src/cli/index.js';
 import * as doctorModule from '../../src/cli/commands/doctor.js';
 import * as runModule from '../../src/cli/commands/run.js';
 import { loadLedger } from '../../src/core/ledger.js';
+import { PtyRunner } from '../../src/pty/runner.js';
 
 describe('CLI Parser', () => {
   let tempBaseDir: string;
@@ -157,6 +158,18 @@ describe('CLI Parser', () => {
       expect(process.exitCode).toBe(1);
       consoleLogSpy.mockRestore();
     });
+
+    it('sets exitCode 1 when non-existent --agy-bin override is passed without dryRun', async () => {
+      const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await doctorModule.doctorCommand(process.cwd(), {
+        agyBin: 'non-existent-agy-bin-xyz',
+        dryRun: false,
+      });
+
+      expect(process.exitCode).toBe(1);
+      consoleLogSpy.mockRestore();
+    });
   });
 
   describe('Run Command Behavior', () => {
@@ -170,6 +183,37 @@ describe('CLI Parser', () => {
       expect(ledger.status).toBe('COMPLETED');
       expect(ledger.events.some((e) => e.message.includes('started'))).toBe(true);
       expect(ledger.events.some((e) => e.message.includes('ended with exit code 0'))).toBe(true);
+    });
+
+    it('handles ptyRunner.start() rejection by logging error, setting ledger to FAILED, and exitCode 1', async () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const startSpy = vi
+        .spyOn(PtyRunner.prototype, 'start')
+        .mockRejectedValue(new Error('Spawn failed simulate error'));
+
+      await runModule.runCommand(process.cwd(), {
+        dryRun: true,
+        agent: 'error-agent',
+      });
+
+      expect(consoleErrorSpy).toHaveBeenCalled();
+      const errCall = consoleErrorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(errCall).toContain('Supervisor execution failed: Spawn failed simulate error');
+      expect(process.exitCode).toBe(1);
+
+      const ledger = loadLedger(process.cwd());
+      expect(ledger.status).toBe('FAILED');
+      expect(ledger.activeAgent).toBeNull();
+      expect(
+        ledger.events.some(
+          (e) =>
+            e.level === 'ERROR' &&
+            e.message.includes('Supervisor execution failed: Spawn failed simulate error')
+        )
+      ).toBe(true);
+
+      startSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
     });
 
     it('attaches signal handlers that reset ledger to IDLE and kill PTY', async () => {

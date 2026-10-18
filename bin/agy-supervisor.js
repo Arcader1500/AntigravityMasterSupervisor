@@ -2,4 +2,4 @@
 import { createCliProgram } from '../dist/cli/index.js';
 
 const program = createCliProgram();
-program.parse(process.argv);
+await program.parseAsync(process.argv);
