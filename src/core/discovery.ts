@@ -113,14 +113,32 @@ function tryGetVersion(binPath: string): string | undefined {
   }
   try {
     const isWindows = process.platform === 'win32';
-    const isScript = isWindows && /\.(cmd|bat|ps1)$/i.test(binPath);
-    const output = execFileSync(binPath, ['--version'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const opts = {
+      windowsHide: true,
+      encoding: 'utf-8' as BufferEncoding,
+      stdio: ['ignore', 'pipe', 'pipe'] as ['ignore', 'pipe', 'pipe'],
       timeout: 2000,
-      shell: isScript,
-    }).trim();
-    return output || undefined;
+    };
+
+    let output: string;
+    if (/\.ps1$/i.test(binPath)) {
+      output = execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', binPath, '--version'],
+        opts,
+      );
+    } else if (isWindows && /\.(cmd|bat)$/i.test(binPath)) {
+      output = execFileSync(
+        process.env.COMSPEC || 'cmd.exe',
+        ['/d', '/s', '/c', `"${binPath}" --version`],
+        opts,
+      );
+    } else {
+      output = execFileSync(binPath, ['--version'], opts);
+    }
+
+    const trimmed = output.trim();
+    return trimmed || undefined;
   } catch {
     return undefined;
   }

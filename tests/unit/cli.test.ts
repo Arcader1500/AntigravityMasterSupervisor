@@ -220,7 +220,7 @@ describe('CLI Parser', () => {
       const listenersBefore = process.listeners('SIGINT').length;
       let capturedSignalHandler: (() => void) | undefined;
 
-      const onSpy = vi.spyOn(process, 'on').mockImplementation((event: string, listener: any) => {
+      const onSpy = vi.spyOn(process, 'on').mockImplementation((event: string | symbol, listener: any) => {
         if (event === 'SIGINT') {
           capturedSignalHandler = listener;
         }
