@@ -65,6 +65,63 @@ Just prose description without checkboxes.
       expect(tasks).toHaveLength(1);
       expect(tasks[0].status).toBe('completed');
     });
+
+    it('parses execution waves table, task wave metadata, indices, and step checklists', () => {
+      const markdown = `
+# Implementation Plan
+
+## Execution Waves
+
+| Wave | Tasks | Description | Files Touched |
+|---|---|---|---|
+| Wave 1 | Task 1, Task 2 | Foundation | types.ts, poller.ts |
+| Wave 2 | Task 3 | Integration | store.ts |
+
+### Task 1: Setup Telemetry Wave Types
+- [x] **Step 1: Write the failing test**
+- [ ] Step 2: Implement middleware
+
+### Task 2: Implement Parser Events
+**Wave:** 1
+- [x] Step 1: Add listener
+- [x] Step 2: Emit events
+
+### Task 3: Store Forwarding
+- [ ] Step 1: Subscribe store
+`;
+
+      const tasks = parsePlanTasks(markdown);
+      expect(tasks).toHaveLength(3);
+
+      const task1 = tasks[0];
+      expect(task1.index).toBe(1);
+      expect(task1.wave).toBe(1);
+      expect(task1.totalWaves).toBe(2);
+      expect(task1.checklist).toEqual([
+        { text: 'Write the failing test', checked: true },
+        { text: 'Implement middleware', checked: false },
+      ]);
+      expect(task1.status).toBe('in_progress');
+
+      const task2 = tasks[1];
+      expect(task2.index).toBe(2);
+      expect(task2.wave).toBe(1);
+      expect(task2.totalWaves).toBe(2);
+      expect(task2.checklist).toEqual([
+        { text: 'Add listener', checked: true },
+        { text: 'Emit events', checked: true },
+      ]);
+      expect(task2.status).toBe('completed');
+
+      const task3 = tasks[2];
+      expect(task3.index).toBe(3);
+      expect(task3.wave).toBe(2);
+      expect(task3.totalWaves).toBe(2);
+      expect(task3.checklist).toEqual([
+        { text: 'Subscribe store', checked: false },
+      ]);
+      expect(task3.status).toBe('pending');
+    });
   });
 
   describe('pollWorkspaceOnce', () => {

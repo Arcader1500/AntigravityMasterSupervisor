@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { checkGitRepo } from '../core/discovery.js';
 import { updateLedger, getLedgerPath } from '../core/ledger.js';
-import type { PlanTaskItem, WorkspacePollSnapshot } from './types.js';
+import type { PlanTaskItem, TaskChecklistItem, WorkspacePollSnapshot } from './types.js';
 
 export interface PollWorkspaceOptions {
   syncLedger?: boolean;
@@ -20,10 +20,34 @@ export function parsePlanTasks(markdown: string): PlanTaskItem[] {
   const lines = markdown.split(/\r?\n/);
   const tasks: PlanTaskItem[] = [];
 
+  // 1. Scan wave table rows and map task numbers to wave numbers
+  const taskWaveMap = new Map<number, number>();
+  let maxWaveFound = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const waveRowMatch = trimmed.match(/^\|\s*Wave\s+(\d+)\s*\|\s*([^|]+)\|/i);
+    if (waveRowMatch) {
+      const waveNum = parseInt(waveRowMatch[1], 10);
+      if (waveNum > maxWaveFound) {
+        maxWaveFound = waveNum;
+      }
+      const tasksCell = waveRowMatch[2];
+      const taskMatches = tasksCell.matchAll(/Task\s+(\d+)/gi);
+      for (const tm of taskMatches) {
+        const tNum = parseInt(tm[1], 10);
+        taskWaveMap.set(tNum, waveNum);
+      }
+    }
+  }
+
   let currentTask: {
     id: string;
+    index: number;
     title: string;
     checkboxes: boolean[];
+    checklist: TaskChecklistItem[];
+    wave?: number;
     commitSha?: string;
   } | null = null;
 
@@ -45,11 +69,19 @@ export function parsePlanTasks(markdown: string): PlanTaskItem[] {
       }
     }
 
+    const assignedWave = task.wave ?? taskWaveMap.get(task.index);
+    if (assignedWave !== undefined && assignedWave > maxWaveFound) {
+      maxWaveFound = assignedWave;
+    }
+
     tasks.push({
       id: task.id,
+      index: task.index,
       title: task.title,
       status,
       ...(task.commitSha ? { commitSha: task.commitSha } : {}),
+      ...(assignedWave !== undefined ? { wave: assignedWave } : {}),
+      ...(task.checklist.length > 0 ? { checklist: task.checklist } : {}),
     });
   };
 
@@ -60,14 +92,21 @@ export function parsePlanTasks(markdown: string): PlanTaskItem[] {
       finalizeTask(currentTask);
       const rawTitle = headingMatch[1].trim();
       const taskIdMatch = rawTitle.match(/Task\s+(\d+|[a-zA-Z0-9_-]+)/i);
+      const parsedNum =
+        taskIdMatch && /^\d+$/.test(taskIdMatch[1])
+          ? parseInt(taskIdMatch[1], 10)
+          : undefined;
+      const index = parsedNum ?? (tasks.length + 1);
       const id = taskIdMatch
         ? `task-${taskIdMatch[1].toLowerCase()}`
-        : `task-${tasks.length + 1}`;
+        : `task-${index}`;
 
       currentTask = {
         id,
+        index,
         title: rawTitle,
         checkboxes: [],
+        checklist: [],
       };
       continue;
     }
@@ -80,11 +119,30 @@ export function parsePlanTasks(markdown: string): PlanTaskItem[] {
         continue;
       }
 
+      // Check for task-level wave metadata: **Wave:** (\d+) or Wave: (\d+)
+      const waveMatch = trimmed.match(/^\*{0,2}Wave:\*{0,2}\s*(\d+)/i);
+      if (waveMatch) {
+        const w = parseInt(waveMatch[1], 10);
+        currentTask.wave = w;
+        if (w > maxWaveFound) {
+          maxWaveFound = w;
+        }
+      }
+
       // Check for checkboxes: - [x], - [ ], * [X], etc.
-      const checkboxMatch = trimmed.match(/^[-*]\s+\[([ xX])\]/);
+      const checkboxMatch = trimmed.match(/^[-*]\s+\[([ xX])\]\s*(.*)$/);
       if (checkboxMatch) {
         const isChecked = checkboxMatch[1].toLowerCase() === 'x';
         currentTask.checkboxes.push(isChecked);
+        const rawLabel = checkboxMatch[2] ?? '';
+        const cleanText = rawLabel
+          .replace(/\*\*/g, '')
+          .replace(/^Step\s+\d+:\s*/i, '')
+          .trim();
+        currentTask.checklist.push({
+          text: cleanText,
+          checked: isChecked,
+        });
       }
 
       const commitMatch = trimmed.match(/(?:commit|sha)[:\s]+([a-f0-9]{7,40})/i);
@@ -95,6 +153,15 @@ export function parsePlanTasks(markdown: string): PlanTaskItem[] {
   }
 
   finalizeTask(currentTask);
+
+  if (maxWaveFound > 0) {
+    for (const task of tasks) {
+      if (task.wave !== undefined) {
+        task.totalWaves = maxWaveFound;
+      }
+    }
+  }
+
   return tasks;
 }
 

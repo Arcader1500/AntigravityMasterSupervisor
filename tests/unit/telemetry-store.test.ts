@@ -146,4 +146,32 @@ describe('telemetry/store', () => {
     await new Promise((res) => setTimeout(res, 120));
     expect(pollSpy.mock.calls.length).toBe(callCountAfterStop);
   });
+
+  it('forwards structured telemetry events via onTelemetryEvent and exposes agentSteps and lastErrorLine in snapshot', async () => {
+    const store = new TelemetryStore({
+      projectDir: tmpDir,
+      virtualTerminal: vt,
+      parser,
+    });
+
+    const receivedEvents: any[] = [];
+    const unsub = store.onTelemetryEvent((e) => receivedEvents.push(e));
+
+    await vt.write('invoking subagent implementer\r\n');
+    await vt.write('view_file: auth.ts\r\n');
+    await vt.write('Error: connect ECONNREFUSED 127.0.0.1:6379\r\n');
+
+    expect(receivedEvents.length).toBeGreaterThan(0);
+    expect(receivedEvents.some((e) => e.type === 'SUBAGENT_DISPATCHED')).toBe(true);
+    expect(receivedEvents.some((e) => e.type === 'TOOL_CALLED')).toBe(true);
+    expect(receivedEvents.some((e) => e.type === 'ERROR_LINE')).toBe(true);
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.lastErrorLine).toContain('ECONNREFUSED');
+    expect(snapshot.agentSteps?.['implementer']).toBeDefined();
+    expect(snapshot.agentSteps?.['implementer'].length).toBeGreaterThan(0);
+
+    unsub();
+    store.stop();
+  });
 });

@@ -7,6 +7,7 @@ import { pollWorkspaceOnce } from './poller.js';
 import { appendLedgerEvent, getLedgerPath } from '../core/ledger.js';
 import type {
   ActivityFeedItem,
+  TelemetryEvent,
   TelemetrySnapshot,
   WorkspacePollSnapshot,
 } from './types.js';
@@ -102,6 +103,13 @@ export class TelemetryStore {
       this.parser.processLine(line);
       this.notify();
     });
+  }
+
+  /**
+   * Subscribes a listener to structured telemetry events emitted by the parser.
+   */
+  public onTelemetryEvent(listener: (event: TelemetryEvent) => void): () => void {
+    return this.parser.onEvent(listener);
   }
 
   /**
@@ -254,6 +262,8 @@ export class TelemetryStore {
       activeSubagent: parserState.activeSubagent,
       lastAction: parserState.lastAction,
       lastCommand: parserState.lastCommand,
+      lastErrorLine: parserState.lastErrorLine,
+      agentSteps: parserState.agentSteps,
       waitingForInput: parserState.waitingForInput,
       specPath: this.lastPollSnapshot.specPath,
       specContent: this.lastPollSnapshot.specContent,

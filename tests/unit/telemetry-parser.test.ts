@@ -197,4 +197,174 @@ describe('TelemetryParser (Pure Passive Regex)', () => {
       expect(parser.getState().activeSubagent).toBe('implementer');
     });
   });
+
+  describe('Structured Telemetry Events & Step Grouping', () => {
+    it('emits SUBAGENT_DISPATCHED on subagent invocation', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      const unsub = parser.onEvent((e) => events.push(e));
+
+      parser.processLine('invoke_subagent -> implementer');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: 'SUBAGENT_DISPATCHED',
+        role: 'implementer',
+      });
+      expect(events[0].rawLine).toContain('invoke_subagent -> implementer');
+      unsub();
+    });
+
+    it('emits TOOL_CALLED with addedLines and mcpQuery', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      parser.onEvent((e) => events.push(e));
+
+      parser.processLine('invoke_subagent -> implementer');
+      events.length = 0;
+
+      parser.processLine('write_to_file -> src/middleware/limiter.ts (+84 lines)');
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'TOOL_CALLED',
+          agent: 'implementer',
+          toolName: 'write_to_file',
+          target: 'src/middleware/limiter.ts',
+          addedLines: 84,
+        })
+      );
+
+      parser.processLine('semantic_search_nodes_tool -> rateLimiter');
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'TOOL_CALLED',
+          agent: 'implementer',
+          toolName: 'semantic_search_nodes_tool',
+          mcpQuery: 'rateLimiter',
+        })
+      );
+    });
+
+    it('groups consecutive view_file calls into single read AgentStepItem', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      parser.processLine('invoke_subagent -> implementer');
+
+      parser.processLine('view_file: auth.ts');
+      parser.processLine('view_file: config.ts');
+      parser.processLine('view_file: limiter.test.ts');
+
+      const steps = parser.getState().agentSteps['implementer'];
+      expect(steps).toBeDefined();
+      expect(steps).toHaveLength(1);
+      expect(steps[0]).toMatchObject({
+        agent: 'implementer',
+        kind: 'read',
+        targets: ['auth.ts', 'config.ts', 'limiter.test.ts'],
+        status: 'running',
+      });
+    });
+
+    it('emits COMMAND_FINISHED and TEST_SUMMARY on command and test summary lines', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      parser.onEvent((e) => events.push(e));
+
+      parser.processLine('invoke_subagent -> implementer');
+      parser.processLine('run_command: npm test');
+      parser.processLine('Tests  14 passed, 0 failed (14)');
+      parser.processLine('(Exit 0)');
+
+      const testSummaryEvent = events.find((e) => e.type === 'TEST_SUMMARY');
+      expect(testSummaryEvent).toBeDefined();
+      expect(testSummaryEvent).toMatchObject({
+        type: 'TEST_SUMMARY',
+        agent: 'implementer',
+        passed: 14,
+        failed: 0,
+      });
+
+      const cmdFinishedEvent = events.find((e) => e.type === 'COMMAND_FINISHED');
+      expect(cmdFinishedEvent).toBeDefined();
+      expect(cmdFinishedEvent).toMatchObject({
+        type: 'COMMAND_FINISHED',
+        agent: 'implementer',
+        command: 'npm test',
+        exitCode: 0,
+        testSummary: { passed: 14, failed: 0 },
+      });
+    });
+
+    it('emits ERROR_LINE and updates lastErrorLine on error match', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      parser.onEvent((e) => events.push(e));
+
+      parser.processLine('invoke_subagent -> implementer');
+      parser.processLine('Error: connect ECONNREFUSED 127.0.0.1:6379');
+
+      expect(parser.getState().lastErrorLine).toContain('ECONNREFUSED');
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'ERROR_LINE',
+          agent: 'implementer',
+          message: 'Error: connect ECONNREFUSED 127.0.0.1:6379',
+        })
+      );
+    });
+
+    it('emits DECISION_PROMPT for ask_question with options and permission prompts', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      parser.onEvent((e) => events.push(e));
+
+      // 1. ask_question block with options
+      parser.processLine('ask_question: What HTTP status code should rate limiter return?');
+      parser.processLine('1. (Recommended) 429 with a Retry-After header');
+      parser.processLine('2. 429 with no header');
+
+      const decisionEvents = events.filter((e) => e.type === 'DECISION_PROMPT' && e.promptKind === 'ask_question');
+      expect(decisionEvents.length).toBeGreaterThan(0);
+      const latestDecision = decisionEvents[decisionEvents.length - 1];
+      expect(latestDecision).toMatchObject({
+        promptKind: 'ask_question',
+        options: [
+          expect.objectContaining({ index: 1, label: expect.stringContaining('429 with a Retry-After header'), recommended: true }),
+          expect.objectContaining({ index: 2, label: expect.stringContaining('429 with no header') }),
+        ],
+      });
+
+      // 2. Permission prompt
+      parser.clearWaitingForInput();
+      events.length = 0;
+      parser.processLine('Allow command npm test? (ctrl+k)');
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'DECISION_PROMPT',
+          promptKind: 'permission',
+          options: [
+            { index: 1, label: 'Allow', recommended: true },
+            { index: 2, label: "Don't allow" },
+          ],
+        })
+      );
+    });
+
+    it('emits SUBAGENT_COMPLETED on completion with verdict and elapsedMs', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      parser.onEvent((e) => events.push(e));
+
+      parser.processLine('invoke_subagent -> implementer');
+      parser.processLine('**Status:** DONE');
+
+      const completed = events.find((e) => e.type === 'SUBAGENT_COMPLETED');
+      expect(completed).toBeDefined();
+      expect(completed).toMatchObject({
+        type: 'SUBAGENT_COMPLETED',
+        role: 'implementer',
+        verdict: 'DONE',
+      });
+      expect(completed.elapsedMs).toBeGreaterThanOrEqual(0);
+    });
+  });
 });
