@@ -11,23 +11,75 @@ import type {
   InputMode,
 } from '../telemetry/types.js';
 import type { SupervisorLedger } from '../core/types.js';
-import { App, type AppProps } from './App.js';
+import {
+  App,
+  type AppProps,
+  type TuiInteractionMode,
+  type TuiOverlayId,
+} from './App.js';
+import { TranscriptStore } from './transcript-store.js';
 
-export { App, type AppProps } from './App.js';
+export {
+  App,
+  type AppProps,
+  type TuiInteractionMode,
+  type TuiOverlayId,
+} from './App.js';
 export {
   HeaderBar,
   type HeaderBarProps,
   formatDuration,
+  formatCompactTimer,
 } from './components/HeaderBar.js';
 export { FooterBar, type FooterBarProps } from './components/FooterBar.js';
 export {
-  MainStatusView,
-  type MainStatusViewProps,
-} from './components/MainStatusView.js';
+  Transcript,
+  type TranscriptProps,
+  CompletionCard,
+  type CompletionCardProps,
+} from './components/Transcript.js';
 export {
-  LivePtyView,
-  type LivePtyViewProps,
-} from './components/LivePtyView.js';
+  TeamRail,
+  type TeamRailProps,
+  type TeamMemberRow,
+  deriveTeamMembers,
+  formatElapsed,
+} from './components/TeamRail.js';
+export {
+  ZoomView,
+  type ZoomViewProps,
+  formatAgentStep,
+  toCapitalizedWord,
+} from './components/ZoomView.js';
+export {
+  TakeoverView,
+  type TakeoverViewProps,
+} from './components/TakeoverView.js';
+export {
+  Composer,
+  type ComposerProps,
+  getComposerPlaceholder,
+  wrapComposerLines,
+} from './components/Composer.js';
+export {
+  CommandPalette,
+  type CommandPaletteProps,
+  type SlashCommandItem,
+  SLASH_COMMANDS,
+  filterSlashCommands,
+} from './components/CommandPalette.js';
+export {
+  DelegationCard,
+  type DelegationCardProps,
+} from './components/DelegationCard.js';
+export {
+  DecisionCard,
+  type DecisionCardProps,
+} from './components/DecisionCard.js';
+export {
+  FailureCard,
+  type FailureCardProps,
+} from './components/FailureCard.js';
 export {
   SpecPlanView,
   type SpecPlanViewProps,
@@ -36,6 +88,20 @@ export {
   AuditLogView,
   type AuditLogViewProps,
 } from './components/AuditLogView.js';
+export {
+  TranscriptStore,
+  type TranscriptStoreOptions,
+  type TranscriptStoreSnapshot,
+} from './transcript-store.js';
+export {
+  reduceNarrator,
+  createInitialNarratorState,
+  type NarratorState,
+  type NarratorInputEvent,
+  type TranscriptItem,
+} from './narrator.js';
+export { resolveTheme, type ThemeConfig, type ThemeToken } from './theme.js';
+export { resolveGlyphs, type GlyphSet } from './glyphs.js';
 export type { TuiPanelId, InputMode } from '../telemetry/types.js';
 
 export interface MountSupervisorTuiOptions {
@@ -51,10 +117,12 @@ export interface SupervisorTuiInstance {
   waitUntilExit: () => Promise<void>;
   store: TelemetryStore;
   virtualTerminal: VirtualTerminal;
+  transcriptStore?: TranscriptStore;
 }
 
 interface SupervisorTuiContainerProps {
   store: TelemetryStore;
+  transcriptStore: TranscriptStore;
   projectDir: string;
   onWritePty: (data: string) => void;
   onRequestQuit: () => void;
@@ -65,6 +133,7 @@ interface SupervisorTuiContainerProps {
 
 const SupervisorTuiContainer: React.FC<SupervisorTuiContainerProps> = ({
   store,
+  transcriptStore,
   projectDir,
   onWritePty,
   onRequestQuit,
@@ -86,22 +155,27 @@ const SupervisorTuiContainer: React.FC<SupervisorTuiContainerProps> = ({
 
     const timer = setInterval(() => {
       setSnapshot(store.getSnapshot());
-      setLedger(loadLedger(projectDir));
+      const nextLedger = loadLedger(projectDir);
+      setLedger(nextLedger);
+      transcriptStore.updateLedger(nextLedger);
     }, 1000);
 
     return () => {
       unsubscribe();
       clearInterval(timer);
     };
-  }, [store, projectDir]);
+  }, [store, projectDir, transcriptStore]);
 
   useEffect(() => {
-    setLedger(loadLedger(projectDir));
-  }, [forceNavSignal, projectDir]);
+    const nextLedger = loadLedger(projectDir);
+    setLedger(nextLedger);
+    transcriptStore.updateLedger(nextLedger);
+  }, [forceNavSignal, projectDir, transcriptStore]);
 
   return React.createElement(App, {
     snapshot,
     ledger,
+    transcriptStore,
     onWritePty,
     onRequestQuit,
     initialPanel,
@@ -123,6 +197,33 @@ export function mountSupervisorTui(
     virtualTerminal,
     parser,
     ptyRunner: options.ptyRunner,
+  });
+
+  const onWritePty = (data: string) => {
+    parser.clearWaitingForInput();
+    store.notify();
+    options.ptyRunner.write(data);
+  };
+
+  const initialLedger = loadLedger(options.projectDir);
+  let cleanupRef: (() => void) | null = null;
+
+  const transcriptStore = new TranscriptStore({
+    telemetryStore: store,
+    parser,
+    initialLedger,
+    onWritePty,
+    getPtyPid: () => options.ptyRunner.getPid?.(),
+    onRingBell: () => {
+      try {
+        process.stdout.write('\x07');
+      } catch {
+        // ignore
+      }
+    },
+    onRequestQuit: () => {
+      cleanupRef?.();
+    },
   });
 
   options.ptyRunner.onData((chunk) => {
@@ -156,6 +257,7 @@ export function mountSupervisorTui(
     if (isCleanedUp) return;
     isCleanedUp = true;
 
+    transcriptStore.dispose();
     store.stop();
 
     if (typeof process.stdout.off === 'function') {
@@ -182,17 +284,13 @@ export function mountSupervisorTui(
 
     exitPromiseResolve();
   };
-
-  const onWritePty = (data: string) => {
-    parser.clearWaitingForInput();
-    store.notify();
-    options.ptyRunner.write(data);
-  };
+  cleanupRef = cleanup;
 
   const rerenderContainer = () => {
     inkInstance.rerender(
       React.createElement(SupervisorTuiContainer, {
         store,
+        transcriptStore,
         projectDir: options.projectDir,
         onWritePty,
         onRequestQuit: cleanup,
@@ -205,6 +303,9 @@ export function mountSupervisorTui(
 
   options.ptyRunner.onExit((code) => {
     currentForceNavSignal++;
+    if (code !== 0) {
+      transcriptStore.handlePtyExit(code);
+    }
     try {
       updateLedger(options.projectDir, (l) => {
         l.status = code === 0 ? 'COMPLETED' : 'FAILED';
@@ -219,6 +320,7 @@ export function mountSupervisorTui(
   const inkInstance = render(
     React.createElement(SupervisorTuiContainer, {
       store,
+      transcriptStore,
       projectDir: options.projectDir,
       onWritePty,
       onRequestQuit: cleanup,
@@ -236,5 +338,6 @@ export function mountSupervisorTui(
     waitUntilExit: () => exitPromise,
     store,
     virtualTerminal,
+    transcriptStore,
   };
 }

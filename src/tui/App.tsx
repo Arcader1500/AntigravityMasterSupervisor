@@ -1,54 +1,119 @@
-import React, { useState, useRef, useLayoutEffect } from 'react';
-import { Box, useStdin } from 'ink';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { Box, Text, useStdin, useStdout } from 'ink';
 import type {
   TelemetrySnapshot,
   InputMode,
   TuiPanelId,
+  TelemetryEvent,
 } from '../telemetry/types.js';
 import type { SupervisorLedger } from '../core/types.js';
+import { resolveTheme, type ThemeConfig } from './theme.js';
+import { resolveGlyphs, type GlyphSet } from './glyphs.js';
+import {
+  TranscriptStore,
+  type TranscriptStoreSnapshot,
+} from './transcript-store.js';
 import { HeaderBar } from './components/HeaderBar.js';
 import { FooterBar } from './components/FooterBar.js';
-import { MainStatusView } from './components/MainStatusView.js';
-import { LivePtyView } from './components/LivePtyView.js';
+import { Transcript } from './components/Transcript.js';
+import { TeamRail, deriveTeamMembers } from './components/TeamRail.js';
+import { ZoomView } from './components/ZoomView.js';
+import { TakeoverView } from './components/TakeoverView.js';
+import { Composer, getComposerPlaceholder } from './components/Composer.js';
+import { CommandPalette } from './components/CommandPalette.js';
 import { SpecPlanView } from './components/SpecPlanView.js';
 import { AuditLogView } from './components/AuditLogView.js';
+
+export type TuiInteractionMode = 'CHAT' | 'TEAM' | 'ZOOM' | 'TAKEOVER';
+export type TuiOverlayId = null | 'spec' | 'plan' | 'audit' | 'raw';
+
+// Legacy type aliases for backward compatibility
+export type { TuiPanelId, InputMode } from '../telemetry/types.js';
 
 export interface AppProps {
   snapshot: TelemetrySnapshot;
   ledger: SupervisorLedger;
+  transcriptStore?: TranscriptStore;
   onWritePty: (data: string) => void;
   onRequestQuit: () => void;
+  forceNavigationSignal?: number;
+  dimensions?: { columns: number; rows: number };
+  env?: NodeJS.ProcessEnv;
+  colorLevel?: number;
+  platform?: NodeJS.Platform;
+
+  // Legacy props
   initialPanel?: TuiPanelId;
   initialInputMode?: InputMode;
-  forceNavigationSignal?: number;
 }
 
 export const App: React.FC<AppProps> = ({
   snapshot,
   ledger,
+  transcriptStore,
   onWritePty,
   onRequestQuit,
-  initialPanel = 1,
-  initialInputMode = 'NAVIGATION',
   forceNavigationSignal,
+  dimensions,
+  env,
+  colorLevel,
+  platform,
+  initialInputMode,
 }) => {
-  const [activePanel, setActivePanel] = useState<TuiPanelId>(initialPanel);
-  const [inputMode, setInputMode] = useState<InputMode>(initialInputMode);
-  const [activeDoc, setActiveDoc] = useState<'spec' | 'plan'>('spec');
-  const [scrollOffset, setScrollOffset] = useState<number>(0);
+  const theme = resolveTheme({ env, colorLevel });
+  const glyphs = resolveGlyphs({ env, platform });
 
-  // Synchronous refs to avoid stale closures and handle back-to-back synchronous keystrokes
-  const activePanelRef = useRef<TuiPanelId>(activePanel);
-  activePanelRef.current = activePanel;
+  const { stdout } = useStdout();
+  const [terminalDimensions, setTerminalDimensions] = useState(() => ({
+    columns: dimensions?.columns ?? stdout?.columns ?? 120,
+    rows: dimensions?.rows ?? stdout?.rows ?? 36,
+  }));
 
-  const inputModeRef = useRef<InputMode>(inputMode);
-  inputModeRef.current = inputMode;
+  useEffect(() => {
+    if (dimensions) {
+      setTerminalDimensions(dimensions);
+      return;
+    }
+    const onResize = () => {
+      if (stdout) {
+        setTerminalDimensions({
+          columns: stdout.columns || 120,
+          rows: stdout.rows || 36,
+        });
+      }
+    };
+    stdout?.on('resize', onResize);
+    return () => {
+      stdout?.off('resize', onResize);
+    };
+  }, [dimensions, stdout]);
 
-  const activeDocRef = useRef<'spec' | 'plan'>(activeDoc);
-  activeDocRef.current = activeDoc;
+  const { columns, rows } = dimensions ?? terminalDimensions;
 
-  const scrollOffsetRef = useRef<number>(scrollOffset);
-  scrollOffsetRef.current = scrollOffset;
+  // Mode and view states
+  const initialMode: TuiInteractionMode =
+    initialInputMode === 'PTY_INTERACT' ? 'TAKEOVER' : 'CHAT';
+  const [mode, setMode] = useState<TuiInteractionMode>(initialMode);
+  const [activeOverlay, setActiveOverlay] = useState<TuiOverlayId>(null);
+  const [overlayScrollOffset, setOverlayScrollOffset] = useState<number>(0);
+  const [transcriptScrollOffset, setTranscriptScrollOffset] = useState<number>(0);
+  const [zoomScrollOffset, setZoomScrollOffset] = useState<number>(0);
+  const [selectedMemberIndex, setSelectedMemberIndex] = useState<number>(0);
+  const [composerText, setComposerText] = useState<string>('');
+  const [confirmingQuit, setConfirmingQuit] = useState<boolean>(false);
+
+  // Synchronous refs to prevent stale closure captures in input callbacks
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+
+  const activeOverlayRef = useRef(activeOverlay);
+  activeOverlayRef.current = activeOverlay;
+
+  const composerTextRef = useRef(composerText);
+  composerTextRef.current = composerText;
+
+  const confirmingQuitRef = useRef(confirmingQuit);
+  confirmingQuitRef.current = confirmingQuit;
 
   const onWritePtyRef = useRef(onWritePty);
   onWritePtyRef.current = onWritePty;
@@ -56,25 +121,104 @@ export const App: React.FC<AppProps> = ({
   const onRequestQuitRef = useRef(onRequestQuit);
   onRequestQuitRef.current = onRequestQuit;
 
-  // Track prop transitions to force navigation mode immediately
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
+
+  const ledgerRef = useRef(ledger);
+  ledgerRef.current = ledger;
+
+  // Signal transitions: forceNavigationSignal returns to CHAT mode
   const [prevForceNavSignal, setPrevForceNavSignal] = useState(forceNavigationSignal);
   if (
     forceNavigationSignal !== undefined &&
     forceNavigationSignal !== prevForceNavSignal
   ) {
     setPrevForceNavSignal(forceNavigationSignal);
-    inputModeRef.current = 'NAVIGATION';
-    setInputMode('NAVIGATION');
+    setMode('CHAT');
+    modeRef.current = 'CHAT';
   }
 
-  const { stdin, setRawMode } = useStdin();
+  // Internal TranscriptStore if not supplied in props
+  const [internalStore] = useState(() => {
+    if (transcriptStore) return null;
+    const listeners = new Set<() => void>();
+    const eventListeners = new Set<(ev: TelemetryEvent) => void>();
+    const duckTelemetryStore: any = {
+      getSnapshot: () => snapshotRef.current,
+      onTelemetryEvent: (handler: (ev: TelemetryEvent) => void) => {
+        eventListeners.add(handler);
+        return () => eventListeners.delete(handler);
+      },
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    return new TranscriptStore({
+      telemetryStore: duckTelemetryStore,
+      initialLedger: ledger,
+      onWritePty: (data) => onWritePtyRef.current(data),
+      onRequestQuit: () => onRequestQuitRef.current(),
+      platform,
+    });
+  });
 
+  const effectiveStore = transcriptStore ?? internalStore!;
+
+  // Hook into effectiveStore callbacks for overlays and takeover
+  useEffect(() => {
+    if (effectiveStore) {
+      const existingOptions = (effectiveStore as any).options ?? {};
+      const origOpenOverlay = existingOptions.onOpenOverlay;
+      const origEnterTakeover = existingOptions.onEnterTakeover;
+      const origRequestQuit = existingOptions.onRequestQuit;
+
+      (effectiveStore as any).options = {
+        ...existingOptions,
+        onOpenOverlay: (overlay: 'spec' | 'plan' | 'audit' | 'raw') => {
+          setActiveOverlay(overlay);
+          activeOverlayRef.current = overlay;
+          setOverlayScrollOffset(0);
+          origOpenOverlay?.(overlay);
+        },
+        onEnterTakeover: () => {
+          setMode('TAKEOVER');
+          modeRef.current = 'TAKEOVER';
+          origEnterTakeover?.();
+        },
+        onRequestQuit: () => {
+          onRequestQuitRef.current();
+          origRequestQuit?.();
+        },
+      };
+    }
+  }, [effectiveStore]);
+
+  // Synchronize incoming ledger changes into the store
+  useEffect(() => {
+    effectiveStore.updateLedger(ledger);
+  }, [ledger, effectiveStore]);
+
+  // Track store snapshot reactively
+  const [storeSnapshot, setStoreSnapshot] = useState<TranscriptStoreSnapshot>(() =>
+    effectiveStore.getSnapshot()
+  );
+
+  useEffect(() => {
+    const unsub = effectiveStore.subscribe(() => {
+      setStoreSnapshot(effectiveStore.getSnapshot());
+    });
+    setStoreSnapshot(effectiveStore.getSnapshot());
+    return unsub;
+  }, [effectiveStore]);
+
+  const { stdin, setRawMode } = useStdin();
   useLayoutEffect(() => {
     if (setRawMode) {
       try {
         setRawMode(true);
       } catch {
-        // ignore in non-TTY test environments
+        // ignore in non-TTY environments
       }
     }
     return () => {
@@ -88,72 +232,240 @@ export const App: React.FC<AppProps> = ({
     };
   }, [setRawMode]);
 
+  // Derived members and team rail state
+  const members = deriveTeamMembers(
+    snapshot,
+    storeSnapshot.pendingDecisionCount,
+    storeSnapshot.isPaused,
+    ledger.status
+  );
+
+  const safeMemberIndex = Math.min(
+    Math.max(0, selectedMemberIndex),
+    Math.max(0, members.length - 1)
+  );
+  const selectedMember = members[safeMemberIndex] ?? {
+    id: 'orchestrator',
+    role: 'orchestrator',
+    isMain: true,
+    taskNumber: undefined,
+    statusText: 'running',
+    needsYou: false,
+  };
+
+  const tasks = snapshot.tasks ?? [];
+  const selectedTask =
+    tasks.find(
+      (t) =>
+        t.index === selectedMember.taskNumber ||
+        t.id === String(selectedMember.taskNumber)
+    ) ?? (tasks.length > 0 ? tasks[0] : null);
+
+  const hasStarted =
+    storeSnapshot.hasStarted ||
+    tasks.length > 0 ||
+    Boolean(snapshot.activeSubagent);
+
+  const isRailSideBySide = columns >= 110 && hasStarted;
+
+  const currentWave = selectedTask?.wave;
+  const totalWaves = tasks.reduce(
+    (max, t) => (t.wave && t.wave > max ? t.wave : max),
+    0
+  ) || undefined;
+  const activeTaskNumber =
+    selectedMember.taskNumber ??
+    tasks.find((t) => t.status === 'in_progress')?.index;
+
+  const zoomTarget =
+    mode === 'ZOOM'
+      ? {
+          role: selectedMember.role,
+          taskNumber: selectedMember.taskNumber,
+        }
+      : null;
+
+  const focusedDecision = effectiveStore.getFocusedDecision();
+  const decisionOptionCount =
+    focusedDecision &&
+    focusedDecision.kind === 'DecisionCard' &&
+    focusedDecision.status === 'pending'
+      ? focusedDecision.options.length
+      : undefined;
+
+  const placeholder = getComposerPlaceholder({
+    hasStarted,
+    mode,
+    decisionOptionCount,
+  });
+
+  const bodyRows = Math.max(10, rows - 5);
+
+  const executeSlashCommand = (raw: string) => {
+    const trimmed = raw.trim();
+    const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+    const parts = normalized.split(/\s+/);
+    const command = parts[0].toLowerCase();
+
+    switch (command) {
+      case '/spec':
+        setActiveOverlay('spec');
+        activeOverlayRef.current = 'spec';
+        setOverlayScrollOffset(0);
+        break;
+      case '/plan':
+        setActiveOverlay('plan');
+        activeOverlayRef.current = 'plan';
+        setOverlayScrollOffset(0);
+        break;
+      case '/audit':
+        setActiveOverlay('audit');
+        activeOverlayRef.current = 'audit';
+        setOverlayScrollOffset(0);
+        break;
+      case '/raw':
+        setMode('TAKEOVER');
+        modeRef.current = 'TAKEOVER';
+        break;
+      case '/pause':
+        effectiveStore.pause();
+        break;
+      case '/resume':
+        effectiveStore.resume();
+        break;
+      case '/decide':
+        effectiveStore.refocusDeferredDecision();
+        setTranscriptScrollOffset(0);
+        break;
+      case '/help':
+        effectiveStore.runSlashCommand('/help');
+        break;
+      case '/quit':
+        onRequestQuitRef.current();
+        break;
+      default:
+        effectiveStore.runSlashCommand(trimmed);
+        break;
+    }
+  };
+
+  const handleUpArrow = () => {
+    if (activeOverlayRef.current !== null) {
+      setOverlayScrollOffset((prev) => Math.max(0, prev - 1));
+      return;
+    }
+    if (modeRef.current === 'TEAM') {
+      setSelectedMemberIndex((prev) => Math.max(0, prev - 1));
+      return;
+    }
+    if (modeRef.current === 'ZOOM') {
+      setZoomScrollOffset((prev) => Math.max(0, prev - 1));
+      return;
+    }
+    const focused = effectiveStore.getFocusedDecision();
+    if (focused && composerTextRef.current.length === 0) {
+      const curOpt = focused.selectedOptionIndex || 1;
+      effectiveStore.selectDecisionOption(Math.max(1, curOpt - 1));
+      return;
+    }
+  };
+
+  const handleDownArrow = () => {
+    if (activeOverlayRef.current !== null) {
+      setOverlayScrollOffset((prev) => prev + 1);
+      return;
+    }
+    if (modeRef.current === 'TEAM') {
+      setSelectedMemberIndex((prev) =>
+        Math.min(members.length - 1, prev + 1)
+      );
+      return;
+    }
+    if (modeRef.current === 'ZOOM') {
+      setZoomScrollOffset((prev) => prev + 1);
+      return;
+    }
+    const focused = effectiveStore.getFocusedDecision();
+    if (focused && composerTextRef.current.length === 0) {
+      const curOpt = focused.selectedOptionIndex || 1;
+      const maxOpt = (focused as any).options?.length ?? 9;
+      effectiveStore.selectDecisionOption(Math.min(maxOpt, curOpt + 1));
+      return;
+    }
+  };
+
+  const handleEscape = () => {
+    if (activeOverlayRef.current !== null) {
+      setActiveOverlay(null);
+      activeOverlayRef.current = null;
+      setOverlayScrollOffset(0);
+      return;
+    }
+    if (modeRef.current === 'TEAM' || modeRef.current === 'ZOOM') {
+      setMode('CHAT');
+      modeRef.current = 'CHAT';
+      return;
+    }
+    const focused = effectiveStore.getFocusedDecision();
+    if (focused) {
+      effectiveStore.deferFocusedDecision();
+      return;
+    }
+  };
+
   useLayoutEffect(() => {
-    const handleScrollUp = (lines: number = 1) => {
-      if (activePanelRef.current === 3 || activePanelRef.current === 4) {
-        const next = Math.max(0, scrollOffsetRef.current - lines);
-        scrollOffsetRef.current = next;
-        setScrollOffset(next);
-      }
-    };
-
-    const handleScrollDown = (lines: number = 1) => {
-      if (activePanelRef.current === 3 || activePanelRef.current === 4) {
-        const next = scrollOffsetRef.current + lines;
-        scrollOffsetRef.current = next;
-        setScrollOffset(next);
-      }
-    };
-
-    const handlePtyInput = (raw: string) => {
-      const ctrlRightBracketIdx = raw.indexOf('\x1d');
-      if (ctrlRightBracketIdx !== -1) {
-        const prefix = raw.slice(0, ctrlRightBracketIdx);
-        const suffix = raw.slice(ctrlRightBracketIdx + 1);
-
-        if (prefix.length > 0) {
-          onWritePtyRef.current(prefix);
-        }
-
-        inputModeRef.current = 'NAVIGATION';
-        setInputMode('NAVIGATION');
-
-        if (suffix.length > 0) {
-          handleNavInput(suffix);
-        }
-      } else {
-        onWritePtyRef.current(raw);
-      }
-    };
-
-    const handleNavInput = (input: string) => {
+    const processNavChunk = (input: string) => {
       let i = 0;
       while (i < input.length) {
-        // Handle ANSI escape sequence for arrow keys and PageUp/PageDown
+        // ANSI escape sequences
         if (input.charCodeAt(i) === 0x1b) {
           const rest = input.slice(i);
+
+          // PageUp / PageDown: \x1b[5~ / \x1b[6~
           const pageMatch = rest.match(/^\x1b\[([56])~/);
           if (pageMatch) {
             if (pageMatch[1] === '5') {
-              handleScrollUp(10);
-            } else if (pageMatch[1] === '6') {
-              handleScrollDown(10);
+              if (activeOverlayRef.current !== null) {
+                setOverlayScrollOffset((prev) => Math.max(0, prev - 10));
+              } else {
+                setTranscriptScrollOffset((prev) => prev + 5);
+              }
+            } else {
+              if (activeOverlayRef.current !== null) {
+                setOverlayScrollOffset((prev) => prev + 10);
+              } else {
+                setTranscriptScrollOffset((prev) => Math.max(0, prev - 5));
+              }
             }
             i += pageMatch[0].length;
             continue;
           }
 
+          // End key: \x1b[F or \x1b[4~ or \x1bOF
+          const endMatch = rest.match(/^\x1b(?:\[F|\[4~|OF)/);
+          if (endMatch) {
+            setTranscriptScrollOffset(0);
+            effectiveStore.refocusDeferredDecision();
+            i += endMatch[0].length;
+            continue;
+          }
+
+          // Arrow keys: \x1b[A, \x1b[B, \x1bOA, \x1bOB
           const arrowMatch = rest.match(/^\x1b(?:\[|O)([A-D])/);
           if (arrowMatch) {
             const code = arrowMatch[1];
             if (code === 'A') {
-              handleScrollUp();
+              handleUpArrow();
             } else if (code === 'B') {
-              handleScrollDown();
+              handleDownArrow();
             }
             i += arrowMatch[0].length;
             continue;
-          } else {
+          }
+
+          // Bare Esc key
+          if (rest.length === 1 || (rest[1] !== '[' && rest[1] !== 'O')) {
+            handleEscape();
             i++;
             continue;
           }
@@ -162,71 +474,174 @@ export const App: React.FC<AppProps> = ({
         const char = input[i];
         i++;
 
-        if (char === 'q' || char === 'Q' || char === '\x03') {
-          onRequestQuitRef.current();
-          return;
-        }
-
-        if (char === '1' || char === '2' || char === '3' || char === '4') {
-          const targetPanel = parseInt(char, 10) as TuiPanelId;
-          activePanelRef.current = targetPanel;
-          setActivePanel(targetPanel);
-          scrollOffsetRef.current = 0;
-          setScrollOffset(0);
-          continue;
-        }
-
-        if (char === 't' || char === 'T') {
-          activePanelRef.current = 2;
-          setActivePanel(2);
-          inputModeRef.current = 'PTY_INTERACT';
-          setInputMode('PTY_INTERACT');
-          if (i < input.length) {
-            const remaining = input.slice(i);
-            handlePtyInput(remaining);
+        // Ctrl+C confirmation: \x03
+        if (char === '\x03') {
+          if (confirmingQuitRef.current) {
+            onRequestQuitRef.current();
             return;
           }
+          confirmingQuitRef.current = true;
+          setConfirmingQuit(true);
+          continue;
+        }
+        if (confirmingQuitRef.current) {
+          confirmingQuitRef.current = false;
+          setConfirmingQuit(false);
+        }
+
+        // Ctrl+T: \x14
+        if (char === '\x14') {
+          setMode('TAKEOVER');
+          modeRef.current = 'TAKEOVER';
           continue;
         }
 
-        if (
-          (char === 'i' || char === 'I' || char === '\r' || char === '\n') &&
-          activePanelRef.current === 2
-        ) {
-          inputModeRef.current = 'PTY_INTERACT';
-          setInputMode('PTY_INTERACT');
-          if (i < input.length) {
-            const remaining = input.slice(i);
-            handlePtyInput(remaining);
-            return;
+        // Ctrl+R: \x12
+        if (char === '\x12') {
+          if (modeRef.current === 'ZOOM') {
+            setActiveOverlay('raw');
+            activeOverlayRef.current = 'raw';
+            setOverlayScrollOffset(0);
           }
           continue;
         }
 
-        if (activePanelRef.current === 3) {
-          if (char === 's' || char === 'S') {
-            activeDocRef.current = 'spec';
-            setActiveDoc('spec');
-            scrollOffsetRef.current = 0;
-            setScrollOffset(0);
+        // Tab: \t
+        if (char === '\t') {
+          if (modeRef.current === 'CHAT') {
+            setMode('TEAM');
+            modeRef.current = 'TEAM';
+          } else if (modeRef.current === 'TEAM') {
+            setMode('CHAT');
+            modeRef.current = 'CHAT';
+          }
+          continue;
+        }
+
+        // Active overlay view keys
+        if (activeOverlayRef.current !== null) {
+          if (char === '\x1b') {
+            setActiveOverlay(null);
+            activeOverlayRef.current = null;
+            setOverlayScrollOffset(0);
             continue;
           }
-          if (char === 'p' || char === 'P') {
-            activeDocRef.current = 'plan';
-            setActiveDoc('plan');
-            scrollOffsetRef.current = 0;
-            setScrollOffset(0);
+          if (
+            activeOverlayRef.current === 'spec' ||
+            activeOverlayRef.current === 'plan'
+          ) {
+            if (char === 's' || char === 'S') {
+              setActiveOverlay('spec');
+              activeOverlayRef.current = 'spec';
+              setOverlayScrollOffset(0);
+              continue;
+            }
+            if (char === 'p' || char === 'P') {
+              setActiveOverlay('plan');
+              activeOverlayRef.current = 'plan';
+              setOverlayScrollOffset(0);
+              continue;
+            }
+          }
+          if (char === 'k' || char === 'K') {
+            setOverlayScrollOffset((prev) => Math.max(0, prev - 1));
+            continue;
+          }
+          if (char === 'j' || char === 'J') {
+            setOverlayScrollOffset((prev) => prev + 1);
+            continue;
+          }
+          continue;
+        }
+
+        // TEAM mode
+        if (modeRef.current === 'TEAM') {
+          if (char === '\x1b') {
+            setMode('CHAT');
+            modeRef.current = 'CHAT';
+            continue;
+          }
+          if (char === '\r' || char === '\n') {
+            setMode('ZOOM');
+            modeRef.current = 'ZOOM';
+            continue;
+          }
+          continue;
+        }
+
+        // ZOOM mode Esc
+        if (modeRef.current === 'ZOOM' && char === '\x1b') {
+          setMode('CHAT');
+          modeRef.current = 'CHAT';
+          continue;
+        }
+
+        // Decision card interactions in CHAT mode
+        const focused = effectiveStore.getFocusedDecision();
+        if (focused && composerTextRef.current.length === 0) {
+          if (char === '\x1b') {
+            effectiveStore.deferFocusedDecision();
+            continue;
+          }
+          if (char === '\r' || char === '\n') {
+            effectiveStore.answerFocusedDecision();
+            continue;
+          }
+          if (char >= '1' && char <= '9') {
+            const digit = parseInt(char, 10);
+            effectiveStore.selectDecisionOption(digit);
             continue;
           }
         }
 
-        if (char === 'k' || char === 'K') {
-          handleScrollUp();
+        // Backspace handling
+        if (char === '\x7f' || char === '\b') {
+          const next = composerTextRef.current.slice(0, -1);
+          composerTextRef.current = next;
+          setComposerText(next);
+          if (next.length === 0 && focused) {
+            effectiveStore.selectDecisionOption(1);
+          }
           continue;
         }
 
-        if (char === 'j' || char === 'J') {
-          handleScrollDown();
+        // Enter / newline submission
+        if (char === '\r' || char === '\n') {
+          const currentText = composerTextRef.current;
+          if (currentText.endsWith('\\')) {
+            const next = currentText.slice(0, -1) + '\n';
+            composerTextRef.current = next;
+            setComposerText(next);
+            continue;
+          }
+          if (currentText.startsWith('/')) {
+            executeSlashCommand(currentText);
+            composerTextRef.current = '';
+            setComposerText('');
+            continue;
+          }
+          if (focused) {
+            effectiveStore.answerFocusedDecision(
+              currentText.length > 0 ? currentText : undefined
+            );
+            composerTextRef.current = '';
+            setComposerText('');
+            continue;
+          }
+          if (currentText.length > 0) {
+            effectiveStore.submitUserMessage(currentText);
+            composerTextRef.current = '';
+            setComposerText('');
+            continue;
+          }
+          continue;
+        }
+
+        // Printable character appending
+        if (char.charCodeAt(0) >= 32) {
+          const next = composerTextRef.current + char;
+          composerTextRef.current = next;
+          setComposerText(next);
           continue;
         }
       }
@@ -234,11 +649,30 @@ export const App: React.FC<AppProps> = ({
 
     const handleData = (chunk: Buffer | string) => {
       const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
-      if (inputModeRef.current === 'PTY_INTERACT') {
-        handlePtyInput(raw);
-      } else {
-        handleNavInput(raw);
+
+      if (modeRef.current === 'TAKEOVER') {
+        const ctrlRightBracketIdx = raw.indexOf('\x1d');
+        if (ctrlRightBracketIdx !== -1) {
+          const prefix = raw.slice(0, ctrlRightBracketIdx);
+          const suffix = raw.slice(ctrlRightBracketIdx + 1);
+
+          if (prefix.length > 0) {
+            onWritePtyRef.current(prefix);
+          }
+
+          setMode('CHAT');
+          modeRef.current = 'CHAT';
+
+          if (suffix.length > 0) {
+            processNavChunk(suffix);
+          }
+        } else {
+          onWritePtyRef.current(raw);
+        }
+        return;
       }
+
+      processNavChunk(raw);
     };
 
     stdin.on('data', handleData);
@@ -247,43 +681,150 @@ export const App: React.FC<AppProps> = ({
     };
   }, [stdin]);
 
+  // Minimum size guard
+  if (columns < 80 || rows < 24) {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text color={theme.colors.ask}>
+          Make this window at least 80 columns by 24 rows.
+        </Text>
+      </Box>
+    );
+  }
+
+  // Render main layout
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={columns}>
+      {/* Header Bar */}
       <HeaderBar
         branch={snapshot.branch}
         totalElapsedMs={snapshot.totalElapsedMs}
         status={ledger.status}
-        inputMode={inputMode}
-        waitingForInput={snapshot.waitingForInput}
+        specApproved={ledger.checkpoints?.spec?.status === 'APPROVED'}
+        planApproved={ledger.checkpoints?.plan?.status === 'APPROVED'}
+        currentWave={currentWave}
+        totalWaves={totalWaves}
+        currentTask={activeTaskNumber}
+        totalTasks={tasks.length}
+        pendingDecisionCount={storeSnapshot.pendingDecisionCount}
+        isPaused={storeSnapshot.isPaused}
+        zoomTarget={zoomTarget}
+        theme={theme}
+        glyphs={glyphs}
       />
 
-      {activePanel === 1 && <MainStatusView snapshot={snapshot} />}
-      {activePanel === 2 && (
-        <LivePtyView
-          lines={snapshot.ptyViewportLines}
-          inputMode={inputMode}
-          mainAgent={snapshot.mainAgent}
-          pid={snapshot.pid}
-        />
-      )}
-      {activePanel === 3 && (
+      {/* Main Body Area */}
+      {activeOverlay === 'spec' || activeOverlay === 'plan' ? (
         <SpecPlanView
           specPath={snapshot.specPath}
           specContent={snapshot.specContent}
           planPath={snapshot.planPath}
           planContent={snapshot.planContent}
-          activeDoc={activeDoc}
-          scrollOffset={scrollOffset}
+          activeDoc={activeOverlay}
+          scrollOffset={overlayScrollOffset}
+          maxRows={bodyRows}
         />
-      )}
-      {activePanel === 4 && (
-        <AuditLogView ledger={ledger} scrollOffset={scrollOffset} />
+      ) : activeOverlay === 'audit' ? (
+        <AuditLogView
+          ledger={ledger}
+          scrollOffset={overlayScrollOffset}
+          maxRows={bodyRows}
+        />
+      ) : activeOverlay === 'raw' || mode === 'TAKEOVER' ? (
+        <TakeoverView
+          lines={snapshot.ptyViewportLines}
+          maxRows={bodyRows}
+          theme={theme}
+        />
+      ) : mode === 'TEAM' && !isRailSideBySide ? (
+        <TeamRail
+          members={members}
+          tasks={tasks}
+          ledgerStatus={ledger.status}
+          selectedMemberIndex={safeMemberIndex}
+          isFocused={true}
+          handledCounts={storeSnapshot.handledCounts}
+          width={columns}
+          theme={theme}
+          glyphs={glyphs}
+        />
+      ) : (
+        <Box flexDirection="row" flexGrow={1}>
+          {mode === 'ZOOM' ? (
+            <Box flexGrow={1}>
+              <ZoomView
+                role={selectedMember.role}
+                taskNumber={selectedMember.taskNumber}
+                taskTitle={selectedTask?.title}
+                elapsedFormatted={selectedMember.elapsedFormatted || '0s'}
+                steps={
+                  snapshot.agentSteps?.[selectedMember.role] ??
+                  snapshot.agentSteps?.[selectedMember.id] ??
+                  []
+                }
+                ptyLines={snapshot.ptyViewportLines}
+                scrollOffset={zoomScrollOffset}
+                theme={theme}
+                glyphs={glyphs}
+              />
+            </Box>
+          ) : (
+            <Box flexGrow={1}>
+              <Transcript
+                items={storeSnapshot.items}
+                scrollOffset={transcriptScrollOffset}
+                maxRows={bodyRows}
+                maxWidth={columns - (isRailSideBySide ? 34 : 2)}
+                pendingDecisionCount={storeSnapshot.pendingDecisionCount}
+                focusedDecisionId={storeSnapshot.focusedDecision?.id ?? null}
+                theme={theme}
+                glyphs={glyphs}
+              />
+            </Box>
+          )}
+
+          {isRailSideBySide && (
+            <TeamRail
+              members={members}
+              tasks={tasks}
+              ledgerStatus={ledger.status}
+              selectedMemberIndex={safeMemberIndex}
+              isFocused={mode === 'TEAM'}
+              zoomTask={mode === 'ZOOM' ? selectedTask : null}
+              handledCounts={storeSnapshot.handledCounts}
+              width={32}
+              theme={theme}
+              glyphs={glyphs}
+            />
+          )}
+        </Box>
       )}
 
+      {/* Composer and Command Palette (hidden during takeover and active overlays) */}
+      {mode !== 'TAKEOVER' && activeOverlay === null && (
+        <Box flexDirection="column">
+          {composerText.startsWith('/') && (
+            <CommandPalette query={composerText} theme={theme} />
+          )}
+          <Composer
+            value={composerText}
+            placeholder={placeholder}
+            maxWidth={columns - 4}
+            isFocused={mode === 'CHAT' || mode === 'ZOOM'}
+            theme={theme}
+            glyphs={glyphs}
+          />
+        </Box>
+      )}
+
+      {/* Footer Bar */}
       <FooterBar
-        activePanel={activePanel}
-        inputMode={inputMode}
-        activeDoc={activeDoc}
+        mode={mode}
+        hasFocusedDecision={Boolean(storeSnapshot.focusedDecision)}
+        isPaused={storeSnapshot.isPaused}
+        confirmingQuit={confirmingQuit}
+        activeOverlay={activeOverlay}
+        theme={theme}
       />
     </Box>
   );

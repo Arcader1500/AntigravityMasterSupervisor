@@ -6,12 +6,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { App } from '../../src/tui/App.js';
 import { mountSupervisorTui } from '../../src/tui/index.js';
+import { TranscriptStore } from '../../src/tui/transcript-store.js';
 import type { TelemetrySnapshot } from '../../src/telemetry/types.js';
 import type { SupervisorLedger } from '../../src/core/types.js';
 import { PtyRunner } from '../../src/pty/runner.js';
 import { initLedger, loadLedger } from '../../src/core/ledger.js';
 
-describe('TUI App & Modal Input Router', () => {
+describe('TUI App Mode Router & Responsive Layout', () => {
   const sampleSnapshot: TelemetrySnapshot = {
     branch: 'main',
     dirtyFilesCount: 0,
@@ -52,7 +53,50 @@ describe('TUI App & Modal Input Router', () => {
     ],
   };
 
-  it('switches panels in NAVIGATION mode and locks keystrokes to PTY in PTY_INTERACT mode until Ctrl+]', () => {
+  function createMockTranscriptStore(
+    onWritePty: (data: string) => void,
+    onRequestQuit: () => void,
+    customSnapshot = sampleSnapshot
+  ) {
+    const fakeTelemetryStore = {
+      getSnapshot: () => ({ ...customSnapshot }),
+      onTelemetryEvent: vi.fn(() => () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as any;
+
+    return new TranscriptStore({
+      telemetryStore: fakeTelemetryStore,
+      initialLedger: sampleLedger,
+      onWritePty,
+      onRequestQuit,
+    });
+  }
+
+  it('launching with no prior messages shows empty chat, focused composer, and hides TeamRail', () => {
+    const onWritePty = vi.fn();
+    const onRequestQuit = vi.fn();
+
+    const { lastFrame } = render(
+      <App
+        snapshot={sampleSnapshot}
+        ledger={sampleLedger}
+        onWritePty={onWritePty}
+        onRequestQuit={onRequestQuit}
+      />
+    );
+
+    const frame = lastFrame() ?? '';
+    // Shows initial empty chat note
+    expect(frame).toContain(
+      'What do you want built? Describe it in your own words'
+    );
+    // Focused composer placeholder
+    expect(frame).toContain('Describe what you want built');
+    // TeamRail should be hidden on first launch before work starts
+    expect(frame).not.toContain('Tasks appear once the plan is approved');
+  });
+
+  it('typing characters in CHAT mode appends to Composer and submits on Enter without triggering shortcuts', () => {
     const onWritePty = vi.fn();
     const onRequestQuit = vi.fn();
 
@@ -65,313 +109,386 @@ describe('TUI App & Modal Input Router', () => {
       />
     );
 
-    // 1. Default render shows Panel [1] (MainStatusView)
-    expect(lastFrame()).toContain('CURRENTLY RUNNING');
-    expect(lastFrame()).toContain('planner');
+    // Write letters and digits: q, p, t, r, 1, 2, 3, 4
+    stdin.write('qptr1234');
+    expect(lastFrame()).toContain('qptr1234');
+    // onRequestQuit should NOT have been called by 'q'
+    expect(onRequestQuit).not.toHaveBeenCalled();
 
-    // 2. Pressing '2' switches to Panel [2] (LivePtyView) in NAVIGATION mode
-    stdin.write('2');
-    expect(lastFrame()).toContain('agy prompt >');
-    expect(lastFrame()).toContain('○ NAVIGATION');
-
-    // 3. Pressing 'i' on Panel [2] enters PTY_INTERACT mode
-    stdin.write('i');
-    expect(lastFrame()).toContain('Ctrl+]');
-    expect(lastFrame()).toContain('● PTY INTERACT');
-
-    // 4. While in PTY_INTERACT mode, writing '1', 'hello', '\r', '\x0b' forwards to onWritePty and does NOT switch tabs
-    stdin.write('1');
-    expect(onWritePty).toHaveBeenCalledWith('1');
-    expect(lastFrame()).toContain('● PTY INTERACT');
-
-    stdin.write('hello');
-    expect(onWritePty).toHaveBeenCalledWith('hello');
-
+    // Submit with Enter
     stdin.write('\r');
-    expect(onWritePty).toHaveBeenCalledWith('\r');
-
-    stdin.write('\x0b');
-    expect(onWritePty).toHaveBeenCalledWith('\x0b');
-
-    // 5. Writing '\x1d' (Ctrl+]) detaches back to NAVIGATION mode without forwarding '\x1d'
-    stdin.write('\x1d');
-    expect(onWritePty).not.toHaveBeenCalledWith('\x1d');
-    expect(lastFrame()).toContain('○ NAVIGATION');
-
-    // Now '3' switches to SpecPlanView
-    stdin.write('3');
-    expect(lastFrame()).toContain('# Test Spec Body');
-
-    // And '4' switches to AuditLogView
-    stdin.write('4');
-    expect(lastFrame()).toContain('SUPERVISOR AUDIT LEDGER');
-    expect(lastFrame()).toContain('First event');
+    expect(onWritePty).toHaveBeenCalledWith('qptr1234\r');
   });
 
-  it('switches to Panel 2 and enters PTY_INTERACT directly when pressing "t"', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
+  describe('Decision card interaction', () => {
+    it('pressing 2 then Enter on focused DecisionCard sends \\x1b[B\\r and removes badge', async () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
+      const store = createMockTranscriptStore(onWritePty, onRequestQuit);
 
-    const { stdin, lastFrame } = render(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-      />
-    );
+      store.dispatch({
+        type: 'TELEMETRY_EVENT',
+        event: {
+          type: 'DECISION_PROMPT',
+          promptKind: 'ask_question',
+          headline: 'Select rate limiter strategy',
+          question: 'Which strategy do you prefer?',
+          options: [
+            { index: 1, label: 'Token bucket' },
+            { index: 2, label: 'Leaky bucket' },
+          ],
+          timestamp: new Date().toISOString(),
+        },
+        elapsedFormatted: '0s',
+      });
 
-    // Start at Panel 1
-    expect(lastFrame()).toContain('CURRENTLY RUNNING');
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          transcriptStore={store}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+        />
+      );
 
-    // Press 't' from Panel 1
-    stdin.write('t');
-    expect(lastFrame()).toContain('● PTY INTERACT');
-    expect(lastFrame()).toContain('Ctrl+]');
+      // Verify card is focused and 1 needs you badge is in header
+      expect(lastFrame()).toContain('1 needs you');
+      expect(lastFrame()).toContain('Select rate limiter strategy');
 
-    // Type in PTY_INTERACT
-    stdin.write('ls -la');
-    expect(onWritePty).toHaveBeenCalledWith('ls -la');
+      // Press 2
+      stdin.write('2');
+      // Press Enter
+      stdin.write('\r');
+
+      expect(onWritePty).toHaveBeenCalledWith('\x1b[B\r');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(lastFrame()).toContain('You chose: Leaky bucket');
+      expect(lastFrame()).not.toContain('1 needs you');
+    });
+
+    it('typing non-digit characters switches to free-form and backspacing restores option 1', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
+      const store = createMockTranscriptStore(onWritePty, onRequestQuit);
+
+      store.dispatch({
+        type: 'TELEMETRY_EVENT',
+        event: {
+          type: 'DECISION_PROMPT',
+          promptKind: 'ask_question',
+          headline: 'Select rate limiter strategy',
+          question: 'Which strategy?',
+          options: [
+            { index: 1, label: 'Token bucket' },
+            { index: 2, label: 'Leaky bucket' },
+          ],
+          timestamp: new Date().toISOString(),
+        },
+        elapsedFormatted: '0s',
+      });
+
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          transcriptStore={store}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+        />
+      );
+
+      // Typing non-digit 'w' switches to free-form
+      stdin.write('w');
+      expect(lastFrame()).toContain('w');
+
+      // Backspace back to empty restores option 1
+      stdin.write('\x7f');
+
+      // Submitting on empty sends option 1
+      stdin.write('\r');
+      expect(onWritePty).toHaveBeenCalledWith('\r');
+      expect(lastFrame()).toContain('You chose: Token bucket');
+    });
+
+    it('pressing Esc defers decision and End re-focuses it', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
+      const store = createMockTranscriptStore(onWritePty, onRequestQuit);
+
+      store.dispatch({
+        type: 'TELEMETRY_EVENT',
+        event: {
+          type: 'DECISION_PROMPT',
+          promptKind: 'ask_question',
+          headline: 'Select rate limiter strategy',
+          question: 'Which strategy?',
+          options: [
+            { index: 1, label: 'Token bucket' },
+            { index: 2, label: 'Leaky bucket' },
+          ],
+          timestamp: new Date().toISOString(),
+        },
+        elapsedFormatted: '0s',
+      });
+
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          transcriptStore={store}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+        />
+      );
+
+      expect(lastFrame()).toContain('1 needs you');
+
+      // Esc defers
+      stdin.write('\x1b');
+      // Badge stays
+      expect(lastFrame()).toContain('1 needs you');
+
+      // End key \x1b[F re-focuses
+      stdin.write('\x1b[F');
+      expect(lastFrame()).toContain('1 needs you');
+    });
   });
 
-  it('enters PTY_INTERACT when pressing Enter on Panel 2', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
-
-    const { stdin, lastFrame } = render(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-      />
-    );
-
-    stdin.write('2');
-    expect(lastFrame()).toContain('○ NAVIGATION');
-
-    stdin.write('\r');
-    expect(lastFrame()).toContain('● PTY INTERACT');
-  });
-
-  it('toggles between Spec and Plan on Panel 3 using "s" and "p"', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
-
-    const { stdin, lastFrame } = render(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-        initialPanel={3}
-      />
-    );
-
-    // Default doc on Panel 3 is spec
-    expect(lastFrame()).toContain('# Test Spec Body');
-
-    // Switch to plan with 'p'
-    stdin.write('p');
-    expect(lastFrame()).toContain('# Test Plan Body');
-
-    // Switch back to spec with 's'
-    stdin.write('s');
-    expect(lastFrame()).toContain('# Test Spec Body');
-  });
-
-  it('scrolls SpecPlanView and AuditLogView with arrows and j/k keys', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
-
-    const longSpecSnapshot: TelemetrySnapshot = {
+  describe('Mode transitions', () => {
+    const runningSnapshot: TelemetrySnapshot = {
       ...sampleSnapshot,
-      specContent: Array.from({ length: 50 }, (_, i) => `Spec line ${i + 1}`).join('\n'),
+      activeSubagent: 'implementer',
+      subagentElapsedMs: 35000,
+      tasks: [
+        {
+          id: '1',
+          title: 'Route middleware',
+          status: 'in_progress',
+        },
+      ],
+      ptyViewportLines: ['npm test', '14 passed'],
     };
 
-    const { stdin, lastFrame } = render(
-      <App
-        snapshot={longSpecSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-        initialPanel={3}
-      />
-    );
+    it('Tab enters TEAM, arrows select, Enter zooms, Ctrl+R opens raw overlay, Esc returns', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
 
-    expect(lastFrame()).toContain('Spec line 1');
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+          dimensions={{ columns: 120, rows: 36 }}
+        />
+      );
 
-    // Scroll down with 'j'
-    stdin.write('j');
-    expect(lastFrame()).toContain('Spec line 2');
+      // Press Tab to enter TEAM mode
+      stdin.write('\t');
+      // Down arrow to select row
+      stdin.write('\x1b[B');
 
-    // Scroll down with down arrow \x1b[B
-    stdin.write('\x1b[B');
-    expect(lastFrame()).toContain('Spec line 3');
+      // Enter to enter ZOOM mode
+      stdin.write('\r');
+      expect(lastFrame()).toMatch(/Team \/ (implementer|orchestrator)/);
 
-    // Scroll up with 'k'
-    stdin.write('k');
-    expect(lastFrame()).toContain('Spec line 2');
+      // Ctrl+R (\x12) opens full raw overlay
+      stdin.write('\x12');
+      expect(lastFrame()).toContain('Esc back to the conversation');
 
-    // Scroll up with up arrow \x1b[A
-    stdin.write('\x1b[A');
-    expect(lastFrame()).toContain('Spec line 1');
+      // Esc closes raw overlay back to ZOOM mode
+      stdin.write('\x1b');
+      // Second Esc returns from ZOOM mode to CHAT mode
+      stdin.write('\x1b');
+      expect(lastFrame()).not.toContain('Esc back to the conversation');
+    });
 
-    // Scrolling up at 0 does not underflow
-    stdin.write('k');
-    expect(lastFrame()).toContain('Spec line 1');
+    it('Ctrl+T enters TAKEOVER mode forwarding keystrokes until Ctrl+]', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
+
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+        />
+      );
+
+      // Press Ctrl+T (\x14)
+      stdin.write('\x14');
+      expect(lastFrame()).toContain(
+        "You are typing into the agent's terminal. Press Ctrl+] to return."
+      );
+
+      // Keystrokes forward 100% to onWritePty
+      stdin.write('git status\r');
+      expect(onWritePty).toHaveBeenCalledWith('git status\r');
+
+      // Ctrl+] (\x1d) exits TAKEOVER mode back to CHAT
+      stdin.write('\x1d');
+      expect(lastFrame()).not.toContain(
+        "You are typing into the agent's terminal"
+      );
+    });
+
+    it('/spec, /plan, /audit open overlays and Esc closes them', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
+
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+        />
+      );
+
+      // /spec opens SpecPlanView
+      stdin.write('/spec\r');
+      expect(lastFrame()).toContain('test-design.md');
+      expect(lastFrame()).toContain('Esc back to the conversation');
+
+      // Esc closes
+      stdin.write('\x1b');
+      expect(lastFrame()).not.toContain('test-design.md');
+
+      // /audit opens AuditLogView forwarding ledger
+      stdin.write('/audit\r');
+      expect(lastFrame()).toContain('SUPERVISOR AUDIT LEDGER');
+      expect(lastFrame()).toContain('First event');
+
+      // Esc closes
+      stdin.write('\x1b');
+      expect(lastFrame()).not.toContain('SUPERVISOR AUDIT LEDGER');
+    });
+
+    it('/pause and /resume toggle paused state', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
+
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+        />
+      );
+
+      stdin.write('/pause\r');
+      expect(lastFrame()).toContain('Paused');
+
+      stdin.write('/resume\r');
+      expect(lastFrame()).not.toContain('Paused');
+    });
+
+    it('Ctrl+C once confirms quit and second Ctrl+C calls onRequestQuit', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
+
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+        />
+      );
+
+      // First Ctrl+C
+      stdin.write('\x03');
+      expect(lastFrame()).toContain(
+        'Stop the team and quit? Press Ctrl+C again.'
+      );
+      expect(onRequestQuit).not.toHaveBeenCalled();
+
+      // Second Ctrl+C
+      stdin.write('\x03');
+      expect(onRequestQuit).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it('scrolls SpecPlanView and AuditLogView with PageUp and PageDown by 10 lines', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
-
-    const longSpecSnapshot: TelemetrySnapshot = {
+  describe('Responsive sizing', () => {
+    const runningSnapshot: TelemetrySnapshot = {
       ...sampleSnapshot,
-      specContent: Array.from({ length: 50 }, (_, i) => `Spec line ${i + 1}`).join('\n'),
+      activeSubagent: 'implementer',
+      tasks: [
+        {
+          id: '1',
+          title: 'Route middleware',
+          status: 'in_progress',
+        },
+      ],
     };
 
-    const { stdin, lastFrame } = render(
-      <App
-        snapshot={longSpecSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-        initialPanel={3}
-      />
-    );
+    it('at 120x36 TeamRail is rendered side-by-side', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
 
-    expect(lastFrame()).toContain('Spec line 1');
+      const { lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+          dimensions={{ columns: 120, rows: 36 }}
+        />
+      );
 
-    // PageDown scrolls down by 10 lines (\x1b[6~)
-    stdin.write('\x1b[6~');
-    expect(lastFrame()).toContain('Spec line 11');
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Team');
+      expect(frame).toContain('Tasks');
+      expect(frame).toContain('Route middleware');
+    });
 
-    // PageDown scrolls down another 10 lines
-    stdin.write('\x1b[6~');
-    expect(lastFrame()).toContain('Spec line 21');
+    it('at 80x24 TeamRail is hidden in CHAT mode and opens as overlay on Tab', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
 
-    // PageUp scrolls up by 10 lines (\x1b[5~)
-    stdin.write('\x1b[5~');
-    expect(lastFrame()).toContain('Spec line 11');
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+          dimensions={{ columns: 80, rows: 24 }}
+        />
+      );
 
-    // PageUp scrolls back to top
-    stdin.write('\x1b[5~');
-    expect(lastFrame()).toContain('Spec line 1');
+      // In CHAT mode at 80x24, Tasks list rail is hidden
+      expect(lastFrame()).not.toContain('Tasks\n');
 
-    // PageUp at 0 does not underflow
-    stdin.write('\x1b[5~');
-    expect(lastFrame()).toContain('Spec line 1');
+      // Tab enters TEAM mode and opens rail overlay
+      stdin.write('\t');
+      expect(lastFrame()).toContain('Team');
 
-    // Test on Panel 4 (AuditLogView)
-    const longLedger: SupervisorLedger = {
-      ...sampleLedger,
-      events: Array.from({ length: 50 }, (_, i) => ({
-        timestamp: '10:00:00',
-        level: 'INFO' as const,
-        message: `Audit event ${i + 1}`,
-      })),
-    };
+      // Enter enters ZOOM mode and rail closes so Zoom gets full width
+      stdin.write('\r');
+      expect(lastFrame()).toMatch(/Team \/ (implementer|orchestrator)/);
+    });
 
-    const { stdin: stdin4, lastFrame: lastFrame4 } = render(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={longLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-        initialPanel={4}
-      />
-    );
+    it('below 80x24 renders minimum window size guard', () => {
+      const onWritePty = vi.fn();
+      const onRequestQuit = vi.fn();
 
-    expect(lastFrame4()).toContain('Audit event 1');
-    stdin4.write('\x1b[6~');
-    expect(lastFrame4()).toContain('Audit event 11');
-    stdin4.write('\x1b[5~');
-    expect(lastFrame4()).toContain('Audit event 1');
-  });
+      const { lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={onRequestQuit}
+          dimensions={{ columns: 70, rows: 20 }}
+        />
+      );
 
-  it('invokes onRequestQuit when "q", "Q", or Ctrl+C is pressed in NAVIGATION mode', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
-
-    const { stdin } = render(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-      />
-    );
-
-    stdin.write('q');
-    expect(onRequestQuit).toHaveBeenCalledTimes(1);
-
-    stdin.write('Q');
-    expect(onRequestQuit).toHaveBeenCalledTimes(2);
-
-    stdin.write('\x03');
-    expect(onRequestQuit).toHaveBeenCalledTimes(3);
-  });
-
-  it('splits chunk with Ctrl+] in PTY_INTERACT mode, forwarding prefix and handling suffix in NAVIGATION', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
-
-    const { stdin, lastFrame } = render(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-        initialPanel={2}
-        initialInputMode="PTY_INTERACT"
-      />
-    );
-
-    expect(lastFrame()).toContain('● PTY INTERACT');
-
-    // Send chunk containing text before Ctrl+] and '3' after Ctrl+]
-    stdin.write('my-command\x1d3');
-    expect(onWritePty).toHaveBeenCalledWith('my-command');
-    expect(onWritePty).not.toHaveBeenCalledWith('my-command\x1d3');
-
-    // Should now be on Panel 3 in NAVIGATION mode
-    expect(lastFrame()).toContain('[NAV]');
-    expect(lastFrame()).toContain('# Test Spec Body');
-  });
-
-  it('returns to NAVIGATION mode when forceNavigationSignal updates', () => {
-    const onWritePty = vi.fn();
-    const onRequestQuit = vi.fn();
-
-    const { rerender, lastFrame } = render(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-        initialPanel={2}
-        initialInputMode="PTY_INTERACT"
-        forceNavigationSignal={0}
-      />
-    );
-
-    expect(lastFrame()).toContain('● PTY INTERACT');
-
-    // Rerender with incremented forceNavigationSignal
-    rerender(
-      <App
-        snapshot={sampleSnapshot}
-        ledger={sampleLedger}
-        onWritePty={onWritePty}
-        onRequestQuit={onRequestQuit}
-        initialPanel={2}
-        initialInputMode="PTY_INTERACT"
-        forceNavigationSignal={1}
-      />
-    );
-
-    expect(lastFrame()).toContain('○ NAVIGATION');
+      expect(lastFrame()).toContain(
+        'Make this window at least 80 columns by 24 rows.'
+      );
+    });
   });
 });
 
@@ -410,11 +527,9 @@ describe('mountSupervisorTui integration', () => {
     expect(typeof tui.unmount).toBe('function');
     expect(typeof tui.waitUntilExit).toBe('function');
 
-    // Verify virtualTerminal received initial dimensions
     expect(tui.virtualTerminal.getCols()).toBeGreaterThanOrEqual(20);
     expect(tui.virtualTerminal.getRows()).toBeGreaterThanOrEqual(10);
 
-    // Clean unmount
     tui.unmount();
     await tui.waitUntilExit();
   });
@@ -444,10 +559,11 @@ describe('mountSupervisorTui integration', () => {
     const notifySpy = vi.spyOn(tui.store, 'notify');
     capturedDataListener!('test output from pty\r\n');
 
-    // Wait for virtualTerminal.write promise to resolve
     await new Promise((r) => setTimeout(r, 50));
     expect(notifySpy).toHaveBeenCalled();
-    expect(tui.virtualTerminal.getViewportLines().join(' ')).toContain('test output from pty');
+    expect(tui.virtualTerminal.getViewportLines().join(' ')).toContain(
+      'test output from pty'
+    );
 
     tui.unmount();
     await tui.waitUntilExit();
