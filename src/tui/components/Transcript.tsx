@@ -257,7 +257,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // Handle maxRows and scrollOffset slicing if maxRows is defined
   let visibleElements = renderedElements;
   if (maxRows !== undefined && maxRows > 0 && renderedElements.length > maxRows) {
-    const end = Math.max(0, renderedElements.length - scrollOffset);
+    const maxScroll = Math.max(0, renderedElements.length - maxRows);
+    const safeScrollOffset = Math.min(scrollOffset, maxScroll);
+    const end = Math.max(0, renderedElements.length - safeScrollOffset);
     const start = Math.max(0, end - maxRows);
     visibleElements = renderedElements.slice(start, end);
   }

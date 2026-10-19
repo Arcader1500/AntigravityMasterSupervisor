@@ -22,6 +22,12 @@ export function formatElapsedHuman(ms: number): string {
   return `${seconds}s`;
 }
 
+export interface TranscriptStoreCallbacks {
+  onOpenOverlay?: (overlay: 'spec' | 'plan' | 'audit' | 'raw') => void;
+  onEnterTakeover?: () => void;
+  onRequestQuit?: () => void;
+}
+
 export interface TranscriptStoreOptions {
   telemetryStore: TelemetryStore;
   parser?: TelemetryParser;
@@ -141,6 +147,28 @@ export class TranscriptStore {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  public setCallbacks(callbacks: TranscriptStoreCallbacks): () => void {
+    const prevOpenOverlay = this.options.onOpenOverlay;
+    const prevEnterTakeover = this.options.onEnterTakeover;
+    const prevRequestQuit = this.options.onRequestQuit;
+
+    if (callbacks.onOpenOverlay !== undefined) {
+      this.options.onOpenOverlay = callbacks.onOpenOverlay;
+    }
+    if (callbacks.onEnterTakeover !== undefined) {
+      this.options.onEnterTakeover = callbacks.onEnterTakeover;
+    }
+    if (callbacks.onRequestQuit !== undefined) {
+      this.options.onRequestQuit = callbacks.onRequestQuit;
+    }
+
+    return () => {
+      this.options.onOpenOverlay = prevOpenOverlay;
+      this.options.onEnterTakeover = prevEnterTakeover;
+      this.options.onRequestQuit = prevRequestQuit;
     };
   }
 

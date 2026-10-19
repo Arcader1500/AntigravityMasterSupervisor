@@ -489,6 +489,60 @@ describe('TUI App Mode Router & Responsive Layout', () => {
         'Make this window at least 80 columns by 24 rows.'
       );
     });
+
+    it('disposes internalStore on unmount to prevent interval leak', async () => {
+      const disposeSpy = vi.spyOn(TranscriptStore.prototype, 'dispose');
+      const { unmount } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+        />
+      );
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(disposeSpy).not.toHaveBeenCalled();
+      unmount();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(disposeSpy).toHaveBeenCalled();
+      disposeSpy.mockRestore();
+    });
+
+    it('registers callbacks via setCallbacks on effectiveStore and cleans up on unmount', async () => {
+      const mockStore = createMockTranscriptStore(vi.fn(), vi.fn());
+      let restoreFn: (() => void) | undefined;
+      const origSetCallbacks = mockStore.setCallbacks.bind(mockStore);
+      const setCallbacksSpy = vi.spyOn(mockStore, 'setCallbacks').mockImplementation((cbs) => {
+        const cleanup = origSetCallbacks(cbs);
+        restoreFn = vi.fn(cleanup);
+        return restoreFn;
+      });
+
+      const { unmount } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          transcriptStore={mockStore}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+        />
+      );
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(setCallbacksSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          onOpenOverlay: expect.any(Function),
+          onEnterTakeover: expect.any(Function),
+          onRequestQuit: expect.any(Function),
+        })
+      );
+
+      unmount();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(restoreFn).toHaveBeenCalled();
+      mockStore.dispose();
+    });
   });
 });
 

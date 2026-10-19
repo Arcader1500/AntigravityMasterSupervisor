@@ -165,33 +165,29 @@ export const App: React.FC<AppProps> = ({
 
   const effectiveStore = transcriptStore ?? internalStore!;
 
+  // Dispose internalStore on unmount to prevent interval and listener leaks
+  useEffect(() => {
+    return () => {
+      internalStore?.dispose();
+    };
+  }, [internalStore]);
+
   // Hook into effectiveStore callbacks for overlays and takeover
   useEffect(() => {
-    if (effectiveStore) {
-      const existingOptions = (effectiveStore as any).options ?? {};
-      const origOpenOverlay = existingOptions.onOpenOverlay;
-      const origEnterTakeover = existingOptions.onEnterTakeover;
-      const origRequestQuit = existingOptions.onRequestQuit;
-
-      (effectiveStore as any).options = {
-        ...existingOptions,
-        onOpenOverlay: (overlay: 'spec' | 'plan' | 'audit' | 'raw') => {
-          setActiveOverlay(overlay);
-          activeOverlayRef.current = overlay;
-          setOverlayScrollOffset(0);
-          origOpenOverlay?.(overlay);
-        },
-        onEnterTakeover: () => {
-          setMode('TAKEOVER');
-          modeRef.current = 'TAKEOVER';
-          origEnterTakeover?.();
-        },
-        onRequestQuit: () => {
-          onRequestQuitRef.current();
-          origRequestQuit?.();
-        },
-      };
-    }
+    return effectiveStore.setCallbacks({
+      onOpenOverlay: (overlay: 'spec' | 'plan' | 'audit' | 'raw') => {
+        setActiveOverlay(overlay);
+        activeOverlayRef.current = overlay;
+        setOverlayScrollOffset(0);
+      },
+      onEnterTakeover: () => {
+        setMode('TAKEOVER');
+        modeRef.current = 'TAKEOVER';
+      },
+      onRequestQuit: () => {
+        onRequestQuitRef.current();
+      },
+    });
   }, [effectiveStore]);
 
   // Synchronize incoming ledger changes into the store
@@ -520,12 +516,6 @@ export const App: React.FC<AppProps> = ({
 
         // Active overlay view keys
         if (activeOverlayRef.current !== null) {
-          if (char === '\x1b') {
-            setActiveOverlay(null);
-            activeOverlayRef.current = null;
-            setOverlayScrollOffset(0);
-            continue;
-          }
           if (
             activeOverlayRef.current === 'spec' ||
             activeOverlayRef.current === 'plan'
@@ -556,11 +546,6 @@ export const App: React.FC<AppProps> = ({
 
         // TEAM mode
         if (modeRef.current === 'TEAM') {
-          if (char === '\x1b') {
-            setMode('CHAT');
-            modeRef.current = 'CHAT';
-            continue;
-          }
           if (char === '\r' || char === '\n') {
             setMode('ZOOM');
             modeRef.current = 'ZOOM';
@@ -569,20 +554,9 @@ export const App: React.FC<AppProps> = ({
           continue;
         }
 
-        // ZOOM mode Esc
-        if (modeRef.current === 'ZOOM' && char === '\x1b') {
-          setMode('CHAT');
-          modeRef.current = 'CHAT';
-          continue;
-        }
-
         // Decision card interactions in CHAT mode
         const focused = effectiveStore.getFocusedDecision();
         if (focused && composerTextRef.current.length === 0) {
-          if (char === '\x1b') {
-            effectiveStore.deferFocusedDecision();
-            continue;
-          }
           if (char === '\r' || char === '\n') {
             effectiveStore.answerFocusedDecision();
             continue;

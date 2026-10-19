@@ -590,4 +590,28 @@ describe('Transcript', () => {
 
     expect(frame).not.toContain('needs you. Press End to jump to it.');
   });
+
+  it('clamps scrollOffset to avoid viewport blanking when scrolling past the top', () => {
+    const items: TranscriptItem[] = [
+      { id: '1', kind: 'SupervisorNote', text: 'Note 1', timestamp: '2026-10-19T10:00:00Z' },
+      { id: '2', kind: 'SupervisorNote', text: 'Note 2', timestamp: '2026-10-19T10:01:00Z' },
+      { id: '3', kind: 'SupervisorNote', text: 'Note 3', timestamp: '2026-10-19T10:02:00Z' },
+      { id: '4', kind: 'SupervisorNote', text: 'Note 4', timestamp: '2026-10-19T10:03:00Z' },
+      { id: '5', kind: 'SupervisorNote', text: 'Note 5', timestamp: '2026-10-19T10:04:00Z' },
+    ];
+
+    const { lastFrame } = render(
+      <Transcript
+        items={items}
+        maxRows={2}
+        scrollOffset={999}
+        theme={theme}
+        glyphs={glyphs}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Note 1');
+    expect(frame).toContain('Note 2');
+    expect(frame).not.toContain('Note 5');
+  });
 });

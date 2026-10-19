@@ -557,6 +557,23 @@ describe('ZoomView component', () => {
     const frame = lastFrame() ?? '';
     expect(frame).toContain('Two steps so far, 2 failed.');
   });
+
+  it('clamps scrollOffset to steps.length - 1 to avoid blanking steps', () => {
+    const { lastFrame } = render(
+      <ZoomView
+        role="implementer"
+        elapsedFormatted="1m 00s"
+        steps={steps}
+        scrollOffset={999}
+        ptyLines={[]}
+        glyphs={unicodeGlyphs}
+        theme={theme}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Ran npx tsc --noEmit -p tsconfig.json: ok');
+    expect(frame).not.toContain('Read auth.ts');
+  });
 });
 
 describe('TakeoverView component', () => {

@@ -92,6 +92,7 @@ export {
   TranscriptStore,
   type TranscriptStoreOptions,
   type TranscriptStoreSnapshot,
+  type TranscriptStoreCallbacks,
 } from './transcript-store.js';
 export {
   reduceNarrator,

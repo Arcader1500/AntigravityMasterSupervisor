@@ -166,7 +166,9 @@ export const ZoomView: React.FC<ZoomViewProps> = ({
 
   const headerTitle = taskTitle ?? (taskNumber ? `Task ${taskNumber}` : role);
 
-  const visibleSteps = steps.slice(scrollOffset);
+  const maxScroll = Math.max(0, steps.length - 1);
+  const safeOffset = Math.min(scrollOffset, maxScroll);
+  const visibleSteps = steps.slice(safeOffset);
   const settledLines = ptyLines.filter((l) => l.trim().length > 0).slice(-3);
 
   return (

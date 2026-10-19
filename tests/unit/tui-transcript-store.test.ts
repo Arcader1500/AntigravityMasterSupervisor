@@ -477,4 +477,46 @@ describe('TranscriptStore', () => {
       store.dispose();
     });
   });
+
+  describe('setCallbacks callback registration and cleanup', () => {
+    it('registers onOpenOverlay, onEnterTakeover, onRequestQuit and restores previous on cleanup', () => {
+      const store = createStore();
+
+      const customOverlays: string[] = [];
+      let customTakeoverCalled = false;
+      let customQuitCalled = false;
+
+      const restore = store.setCallbacks({
+        onOpenOverlay: (overlay) => {
+          customOverlays.push(overlay);
+        },
+        onEnterTakeover: () => {
+          customTakeoverCalled = true;
+        },
+        onRequestQuit: () => {
+          customQuitCalled = true;
+        },
+      });
+
+      store.runSlashCommand('/spec');
+      expect(customOverlays).toEqual(['spec']);
+
+      store.runSlashCommand('/raw');
+      expect(customTakeoverCalled).toBe(true);
+
+      store.runSlashCommand('/quit');
+      expect(customQuitCalled).toBe(true);
+
+      // Restore previous callbacks
+      restore();
+
+      // Trigger again; custom callbacks should not be called, but original should be
+      const prevOverlayCount = openedOverlays.length;
+      store.runSlashCommand('/plan');
+      expect(customOverlays).toEqual(['spec']);
+      expect(openedOverlays.length).toBe(prevOverlayCount + 1);
+
+      store.dispose();
+    });
+  });
 });
