@@ -7,7 +7,7 @@ import * as doctorModule from '../../src/cli/commands/doctor.js';
 import * as runModule from '../../src/cli/commands/run.js';
 import * as tuiModule from '../../src/tui/index.js';
 import * as rawPassthroughModule from '../../src/pty/raw-passthrough.js';
-import { loadLedger } from '../../src/core/ledger.js';
+import { initLedger, loadLedger, updateLedger } from '../../src/core/ledger.js';
 import { PtyRunner } from '../../src/pty/runner.js';
 
 describe('CLI Parser', () => {
@@ -64,6 +64,16 @@ describe('CLI Parser', () => {
       expect(runOpts).toContain('--no-tui');
       expect(runOpts).toContain('--dry-run');
       expect(runOpts).toContain('--verbose');
+    });
+
+    it('registers --resume on both the root program and the run command', () => {
+      const program = createCliProgram();
+      const rootOptions = program.options.map((opt) => opt.long);
+      expect(rootOptions).toContain('--resume');
+
+      const runCmd = program.commands.find((c) => c.name() === 'run');
+      expect(runCmd).toBeDefined();
+      expect(runCmd!.options.map((opt) => opt.long)).toContain('--resume');
     });
   });
 
@@ -177,6 +187,39 @@ describe('CLI Parser', () => {
         agent: 'planner',
       });
     });
+
+    it('routes --resume from the root program to runCommand', async () => {
+      const runSpy = vi.spyOn(runModule, 'runCommand').mockResolvedValue(undefined);
+      const program = createCliProgram();
+
+      await program.parseAsync([
+        'node',
+        'agy-supervisor',
+        tempBaseDir,
+        '--resume',
+      ]);
+
+      expect(runSpy).toHaveBeenCalledTimes(1);
+      const [, optionsArg] = runSpy.mock.calls[0];
+      expect(optionsArg).toMatchObject({ resume: true });
+    });
+
+    it('routes --resume from the run subcommand to runCommand', async () => {
+      const runSpy = vi.spyOn(runModule, 'runCommand').mockResolvedValue(undefined);
+      const program = createCliProgram();
+
+      await program.parseAsync([
+        'node',
+        'agy-supervisor',
+        'run',
+        tempBaseDir,
+        '--resume',
+      ]);
+
+      expect(runSpy).toHaveBeenCalledTimes(1);
+      const [, optionsArg] = runSpy.mock.calls[0];
+      expect(optionsArg).toMatchObject({ resume: true });
+    });
   });
 
   describe('Doctor Command Behavior', () => {
@@ -231,6 +274,79 @@ describe('CLI Parser', () => {
       expect(ledger.status).toBe('COMPLETED');
       expect(ledger.events.some((e) => e.message.includes('started'))).toBe(true);
       expect(ledger.events.some((e) => e.message.includes('ended with exit code 0'))).toBe(true);
+    });
+
+    it('resets the ledger by default and starts in PLANNING before completion', async () => {
+      initLedger(tempBaseDir);
+      updateLedger(tempBaseDir, (ledger) => {
+        ledger.status = 'EXECUTING';
+        ledger.checkpoints.spec.status = 'APPROVED';
+      });
+
+      let statusBeforeCompletion: string | undefined;
+      const startSpy = vi
+        .spyOn(PtyRunner.prototype, 'start')
+        .mockImplementation(async () => {
+          statusBeforeCompletion = loadLedger(tempBaseDir).status;
+          return 0;
+        });
+
+      await runModule.runCommand(tempBaseDir, { dryRun: true });
+
+      expect(statusBeforeCompletion).toBe('PLANNING');
+      const ledger = loadLedger(tempBaseDir);
+      expect(ledger.status).toBe('COMPLETED');
+      expect(ledger.checkpoints.spec.status).toBe('UNINITIALIZED');
+
+      startSpy.mockRestore();
+    });
+
+    it('preserves existing ledger state when resume is enabled', async () => {
+      initLedger(tempBaseDir);
+      updateLedger(tempBaseDir, (ledger) => {
+        ledger.status = 'EXECUTING';
+        ledger.checkpoints.spec.status = 'APPROVED';
+        ledger.checkpoints.plan.status = 'PENDING';
+      });
+
+      let statusBeforeCompletion: string | undefined;
+      const startSpy = vi
+        .spyOn(PtyRunner.prototype, 'start')
+        .mockImplementation(async () => {
+          statusBeforeCompletion = loadLedger(tempBaseDir).status;
+          return 0;
+        });
+
+      await runModule.runCommand(tempBaseDir, { dryRun: true, resume: true });
+
+      expect(statusBeforeCompletion).toBe('EXECUTING');
+      const ledger = loadLedger(tempBaseDir);
+      expect(ledger.checkpoints.spec.status).toBe('APPROVED');
+      expect(ledger.checkpoints.plan.status).toBe('PENDING');
+
+      startSpy.mockRestore();
+    });
+
+    it('passes a session timestamp to the TUI mount', async () => {
+      const mountSpy = vi.spyOn(tuiModule, 'mountSupervisorTui').mockReturnValue({
+        unmount: vi.fn(),
+        waitUntilExit: vi.fn().mockResolvedValue(undefined),
+        store: {} as any,
+        virtualTerminal: {} as any,
+      });
+
+      await runModule.runCommand(tempBaseDir, {
+        dryRun: true,
+        forceTui: true,
+      });
+
+      expect(mountSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionStartedAt: expect.any(Number),
+        })
+      );
+
+      mountSpy.mockRestore();
     });
 
     it('handles ptyRunner.start() rejection by logging error, setting ledger to FAILED, and exitCode 1', async () => {

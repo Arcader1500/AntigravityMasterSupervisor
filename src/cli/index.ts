@@ -21,6 +21,7 @@ export function createCliProgram(): Command {
     .option('--agent <name>', 'Agent role name to run')
     .option('--no-tui', 'Run in raw interactive terminal passthrough mode without the TUI')
     .option('--dry-run', 'Simulate execution in dry-run mode')
+    .option('--resume', 'Resume previous supervisor session state and plan')
     .option('-v, --verbose', 'Enable verbose logging');
 
   program
@@ -46,6 +47,7 @@ export function createCliProgram(): Command {
     .option('--agent <name>', 'Agent role name to run')
     .option('--no-tui', 'Run in raw interactive terminal passthrough mode without the TUI')
     .option('--dry-run', 'Simulate execution in dry-run mode')
+    .option('--resume', 'Resume previous supervisor session state and plan')
     .option('-v, --verbose', 'Enable verbose logging')
     .action(async (targetDir?: string, cmdOptions?: Partial<CliRunOptions>) => {
       const globalOpts = program.opts<CliRunOptions>();
@@ -54,6 +56,7 @@ export function createCliProgram(): Command {
         agent: cmdOptions?.agent ?? globalOpts.agent,
         dryRun: Boolean(cmdOptions?.dryRun || globalOpts.dryRun),
         verbose: Boolean(cmdOptions?.verbose || globalOpts.verbose),
+        resume: Boolean(cmdOptions?.resume || globalOpts.resume),
         noTui:
           cmdOptions?.tui === false ||
           globalOpts.tui === false ||

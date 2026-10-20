@@ -11,6 +11,7 @@ export interface RunOptions {
   agent?: string;
   dryRun?: boolean;
   verbose?: boolean;
+  resume?: boolean;
   cols?: number;
   rows?: number;
   noTui?: boolean;
@@ -28,7 +29,10 @@ export async function runCommand(
   const projectDir = resolveTargetDir(targetDir);
 
   // Initialize supervisor state ledger if not present
-  initLedger(projectDir);
+  const ledger = initLedger(projectDir, { reset: !options?.resume });
+  const sessionStartedAt = options?.resume
+    ? 0
+    : Date.parse(ledger.createdAt) || Date.now();
 
   const agyResult = findAgyBinary(options?.agyBin);
   if (!agyResult.path && !options?.dryRun) {
@@ -63,6 +67,7 @@ export async function runCommand(
       projectDir,
       ptyRunner,
       mainAgent: options?.agent || 'agy',
+      sessionStartedAt,
     });
   } else {
     // Stream PTY output directly to stdout
@@ -132,7 +137,8 @@ export async function runCommand(
 
   try {
     updateLedger(projectDir, (ledger) => {
-      ledger.status = 'EXECUTING';
+      ledger.status =
+        options?.resume && ledger.status === 'EXECUTING' ? 'EXECUTING' : 'PLANNING';
       if (options?.agent) {
         ledger.activeAgent = options.agent;
       }

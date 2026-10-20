@@ -19,8 +19,8 @@ import { Transcript } from './components/Transcript.js';
 import { TeamRail, deriveTeamMembers } from './components/TeamRail.js';
 import { ZoomView } from './components/ZoomView.js';
 import { TakeoverView } from './components/TakeoverView.js';
-import { Composer, getComposerPlaceholder } from './components/Composer.js';
-import { CommandPalette } from './components/CommandPalette.js';
+import { Composer, getComposerPlaceholder, wrapComposerLines } from './components/Composer.js';
+import { CommandPalette, filterSlashCommands } from './components/CommandPalette.js';
 import { SpecPlanView } from './components/SpecPlanView.js';
 import { AuditLogView } from './components/AuditLogView.js';
 
@@ -100,6 +100,7 @@ export const App: React.FC<AppProps> = ({
   const [zoomScrollOffset, setZoomScrollOffset] = useState<number>(0);
   const [selectedMemberIndex, setSelectedMemberIndex] = useState<number>(0);
   const [composerText, setComposerText] = useState<string>('');
+  const [paletteIndex, setPaletteIndex] = useState<number>(0);
   const [confirmingQuit, setConfirmingQuit] = useState<boolean>(false);
 
   // Synchronous refs to prevent stale closure captures in input callbacks
@@ -111,6 +112,19 @@ export const App: React.FC<AppProps> = ({
 
   const composerTextRef = useRef(composerText);
   composerTextRef.current = composerText;
+
+  const paletteIndexRef = useRef(paletteIndex);
+  paletteIndexRef.current = paletteIndex;
+
+  const setComposerValue = (next: string) => {
+    composerTextRef.current = next;
+    setComposerText(next);
+    paletteIndexRef.current = 0;
+    setPaletteIndex(0);
+  };
+
+  const safePaletteIndex = (matchCount: number): number =>
+    Math.min(Math.max(0, paletteIndexRef.current), Math.max(0, matchCount - 1));
 
   const confirmingQuitRef = useRef(confirmingQuit);
   confirmingQuitRef.current = confirmingQuit;
@@ -264,6 +278,16 @@ export const App: React.FC<AppProps> = ({
 
   const isRailSideBySide = columns >= 110 && hasStarted;
 
+  const showRules = activeOverlay === null && mode !== 'TAKEOVER';
+  const showSplitRule = showRules && isRailSideBySide;
+  const leftPaneCols = Math.max(1, columns - 33);
+  const topRuleText = showSplitRule
+    ? glyphs.hr.repeat(leftPaneCols) + glyphs.teeDown + glyphs.hr.repeat(32)
+    : glyphs.hr.repeat(columns);
+  const bottomRuleText = showSplitRule
+    ? glyphs.hr.repeat(leftPaneCols) + glyphs.teeUp + glyphs.hr.repeat(32)
+    : glyphs.hr.repeat(columns);
+
   const currentWave = selectedTask?.wave;
   const totalWaves = tasks.reduce(
     (max, t) => (t.wave && t.wave > max ? t.wave : max),
@@ -284,7 +308,8 @@ export const App: React.FC<AppProps> = ({
   const focusedDecision = effectiveStore.getFocusedDecision();
   const decisionOptionCount =
     focusedDecision &&
-    focusedDecision.kind === 'DecisionCard' &&
+    (focusedDecision.kind === 'DecisionCard' ||
+      focusedDecision.kind === 'FailureCard') &&
     focusedDecision.status === 'pending'
       ? focusedDecision.options.length
       : undefined;
@@ -295,7 +320,22 @@ export const App: React.FC<AppProps> = ({
     decisionOptionCount,
   });
 
-  const bodyRows = Math.max(10, rows - 5);
+  const paletteMatches = composerText.startsWith('/')
+    ? filterSlashCommands(composerText)
+    : [];
+  const paletteRows = paletteMatches.length;
+  const composerRows =
+    composerText.length === 0
+      ? 1
+      : wrapComposerLines(composerText, columns - 4, 4).length;
+  const bodyRows = Math.max(
+    6,
+    rows -
+      5 -
+      (mode !== 'TAKEOVER' && activeOverlay === null
+        ? composerRows + paletteRows
+        : 0)
+  );
 
   const executeSlashCommand = (raw: string) => {
     const trimmed = raw.trim();
@@ -350,6 +390,16 @@ export const App: React.FC<AppProps> = ({
       setOverlayScrollOffset((prev) => Math.max(0, prev - 1));
       return;
     }
+    if (modeRef.current === 'CHAT' && composerTextRef.current.startsWith('/')) {
+      const matches = filterSlashCommands(composerTextRef.current);
+      if (matches.length > 0) {
+        const next =
+          (paletteIndexRef.current - 1 + matches.length) % matches.length;
+        paletteIndexRef.current = next;
+        setPaletteIndex(next);
+        return;
+      }
+    }
     if (modeRef.current === 'TEAM') {
       setSelectedMemberIndex((prev) => Math.max(0, prev - 1));
       return;
@@ -370,6 +420,15 @@ export const App: React.FC<AppProps> = ({
     if (activeOverlayRef.current !== null) {
       setOverlayScrollOffset((prev) => prev + 1);
       return;
+    }
+    if (modeRef.current === 'CHAT' && composerTextRef.current.startsWith('/')) {
+      const matches = filterSlashCommands(composerTextRef.current);
+      if (matches.length > 0) {
+        const next = (paletteIndexRef.current + 1) % matches.length;
+        paletteIndexRef.current = next;
+        setPaletteIndex(next);
+        return;
+      }
     }
     if (modeRef.current === 'TEAM') {
       setSelectedMemberIndex((prev) =>
@@ -470,6 +529,11 @@ export const App: React.FC<AppProps> = ({
         const char = input[i];
         i++;
 
+        // Collapse a Windows-style CRLF pair into a single Enter.
+        if (char === '\r' && i < input.length && input[i] === '\n') {
+          i++;
+        }
+
         // Ctrl+C confirmation: \x03
         if (char === '\x03') {
           if (confirmingQuitRef.current) {
@@ -504,6 +568,14 @@ export const App: React.FC<AppProps> = ({
 
         // Tab: \t
         if (char === '\t') {
+          if (modeRef.current === 'CHAT' && composerTextRef.current.startsWith('/')) {
+            const matches = filterSlashCommands(composerTextRef.current);
+            if (matches.length > 0) {
+              const next = matches[safePaletteIndex(matches.length)].command;
+              setComposerValue(next);
+              continue;
+            }
+          }
           if (modeRef.current === 'CHAT') {
             setMode('TEAM');
             modeRef.current = 'TEAM';
@@ -563,7 +635,9 @@ export const App: React.FC<AppProps> = ({
           }
           if (char >= '1' && char <= '9') {
             const digit = parseInt(char, 10);
-            effectiveStore.selectDecisionOption(digit);
+            if (digit <= focused.options.length) {
+              effectiveStore.selectDecisionOption(digit);
+            }
             continue;
           }
         }
@@ -571,8 +645,7 @@ export const App: React.FC<AppProps> = ({
         // Backspace handling
         if (char === '\x7f' || char === '\b') {
           const next = composerTextRef.current.slice(0, -1);
-          composerTextRef.current = next;
-          setComposerText(next);
+          setComposerValue(next);
           if (next.length === 0 && focused) {
             effectiveStore.selectDecisionOption(1);
           }
@@ -584,28 +657,29 @@ export const App: React.FC<AppProps> = ({
           const currentText = composerTextRef.current;
           if (currentText.endsWith('\\')) {
             const next = currentText.slice(0, -1) + '\n';
-            composerTextRef.current = next;
-            setComposerText(next);
+            setComposerValue(next);
             continue;
           }
           if (currentText.startsWith('/')) {
-            executeSlashCommand(currentText);
-            composerTextRef.current = '';
-            setComposerText('');
+            const matches = filterSlashCommands(currentText);
+            const command =
+              matches.length > 0
+                ? matches[safePaletteIndex(matches.length)].command
+                : currentText;
+            executeSlashCommand(command);
+            setComposerValue('');
             continue;
           }
           if (focused) {
             effectiveStore.answerFocusedDecision(
               currentText.length > 0 ? currentText : undefined
             );
-            composerTextRef.current = '';
-            setComposerText('');
+            setComposerValue('');
             continue;
           }
           if (currentText.length > 0) {
             effectiveStore.submitUserMessage(currentText);
-            composerTextRef.current = '';
-            setComposerText('');
+            setComposerValue('');
             continue;
           }
           continue;
@@ -614,8 +688,7 @@ export const App: React.FC<AppProps> = ({
         // Printable character appending
         if (char.charCodeAt(0) >= 32) {
           const next = composerTextRef.current + char;
-          composerTextRef.current = next;
-          setComposerText(next);
+          setComposerValue(next);
           continue;
         }
       }
@@ -668,7 +741,7 @@ export const App: React.FC<AppProps> = ({
 
   // Render main layout
   return (
-    <Box flexDirection="column" width={columns}>
+    <Box flexDirection="column" width={columns} height={rows} overflow="hidden">
       {/* Header Bar */}
       <HeaderBar
         branch={snapshot.branch}
@@ -686,6 +759,11 @@ export const App: React.FC<AppProps> = ({
         theme={theme}
         glyphs={glyphs}
       />
+
+      {/* Top structural rule */}
+      {showRules && (
+        <Text color={theme.colors.line}>{topRuleText}</Text>
+      )}
 
       {/* Main Body Area */}
       {activeOverlay === 'spec' || activeOverlay === 'plan' ? (
@@ -709,6 +787,7 @@ export const App: React.FC<AppProps> = ({
           lines={snapshot.ptyViewportLines}
           maxRows={bodyRows}
           theme={theme}
+          showBanner={false}
         />
       ) : mode === 'TEAM' && !isRailSideBySide ? (
         <TeamRail
@@ -723,9 +802,17 @@ export const App: React.FC<AppProps> = ({
           glyphs={glyphs}
         />
       ) : (
-        <Box flexDirection="row" flexGrow={1}>
-          {mode === 'ZOOM' ? (
-            <Box flexGrow={1}>
+        <Box
+          flexDirection="row"
+          flexGrow={1}
+          height={bodyRows}
+          overflow="hidden"
+        >
+          <Box
+            flexGrow={1}
+            width={isRailSideBySide ? leftPaneCols : undefined}
+          >
+            {mode === 'ZOOM' ? (
               <ZoomView
                 role={selectedMember.role}
                 taskNumber={selectedMember.taskNumber}
@@ -741,9 +828,7 @@ export const App: React.FC<AppProps> = ({
                 theme={theme}
                 glyphs={glyphs}
               />
-            </Box>
-          ) : (
-            <Box flexGrow={1}>
+            ) : (
               <Transcript
                 items={storeSnapshot.items}
                 scrollOffset={transcriptScrollOffset}
@@ -754,6 +839,21 @@ export const App: React.FC<AppProps> = ({
                 theme={theme}
                 glyphs={glyphs}
               />
+            )}
+          </Box>
+
+          {isRailSideBySide && (
+            <Box
+              width={1}
+              height={bodyRows}
+              flexDirection="column"
+              overflow="hidden"
+            >
+              {Array.from({ length: bodyRows }, (_, idx) => (
+                <Text key={idx} color={theme.colors.line}>
+                  {glyphs.vr}
+                </Text>
+              ))}
             </Box>
           )}
 
@@ -774,11 +874,20 @@ export const App: React.FC<AppProps> = ({
         </Box>
       )}
 
+      {/* Bottom structural rule */}
+      {showRules && (
+        <Text color={theme.colors.line}>{bottomRuleText}</Text>
+      )}
+
       {/* Composer and Command Palette (hidden during takeover and active overlays) */}
       {mode !== 'TAKEOVER' && activeOverlay === null && (
         <Box flexDirection="column">
           {composerText.startsWith('/') && (
-            <CommandPalette query={composerText} theme={theme} />
+            <CommandPalette
+              query={composerText}
+              selectedIndex={paletteIndex}
+              theme={theme}
+            />
           )}
           <Composer
             value={composerText}
@@ -795,6 +904,7 @@ export const App: React.FC<AppProps> = ({
       <FooterBar
         mode={mode}
         hasFocusedDecision={Boolean(storeSnapshot.focusedDecision)}
+        decisionOptionCount={decisionOptionCount}
         isPaused={storeSnapshot.isPaused}
         confirmingQuit={confirmingQuit}
         activeOverlay={activeOverlay}

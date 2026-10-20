@@ -6,12 +6,14 @@ export interface TakeoverViewProps {
   lines: string[];
   maxRows?: number;
   theme?: ThemeConfig;
+  showBanner?: boolean;
 }
 
 export const TakeoverView: React.FC<TakeoverViewProps> = ({
   lines,
   maxRows = 24,
   theme,
+  showBanner = true,
 }) => {
   const activeTheme = theme ?? resolveTheme();
   const effectiveMaxRows = maxRows > 0 ? maxRows : 24;
@@ -20,11 +22,13 @@ export const TakeoverView: React.FC<TakeoverViewProps> = ({
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box marginBottom={1}>
-        <Text color={activeTheme.colors.ask}>
-          You are typing into the agent's terminal. Press Ctrl+] to return.
-        </Text>
-      </Box>
+      {showBanner && (
+        <Box marginBottom={1}>
+          <Text color={activeTheme.colors.ask}>
+            You are typing into the agent's terminal. Press Ctrl+] to return.
+          </Text>
+        </Box>
+      )}
 
       {visibleLines.length === 0 ? (
         <Text color={activeTheme.colors.dim}>(No terminal output yet)</Text>

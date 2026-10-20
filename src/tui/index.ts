@@ -111,6 +111,7 @@ export interface MountSupervisorTuiOptions {
   mainAgent?: string;
   initialPanel?: TuiPanelId;
   initialInputMode?: InputMode;
+  sessionStartedAt?: number;
 }
 
 export interface SupervisorTuiInstance {
@@ -198,6 +199,7 @@ export function mountSupervisorTui(
     virtualTerminal,
     parser,
     ptyRunner: options.ptyRunner,
+    sessionStartedAt: options.sessionStartedAt,
   });
 
   const onWritePty = (data: string) => {
@@ -283,6 +285,10 @@ export function mountSupervisorTui(
       // ignore
     }
 
+    if (process.stdout.isTTY) {
+      process.stdout.write('\x1b[?1049l');
+    }
+
     exitPromiseResolve();
   };
   cleanupRef = cleanup;
@@ -317,6 +323,10 @@ export function mountSupervisorTui(
     store.notify();
     rerenderContainer();
   });
+
+  if (process.stdout.isTTY) {
+    process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H');
+  }
 
   const inkInstance = render(
     React.createElement(SupervisorTuiContainer, {

@@ -255,6 +255,220 @@ describe('TUI App Mode Router & Responsive Layout', () => {
     });
   });
 
+  describe('Root viewport framing and input edge cases', () => {
+    const runningSnapshot: TelemetrySnapshot = {
+      ...sampleSnapshot,
+      activeSubagent: 'implementer',
+      tasks: [
+        {
+          id: '1',
+          title: 'Route middleware',
+          status: 'in_progress',
+        },
+      ],
+    };
+
+    function decisionStore(
+      onWritePty: (data: string) => void,
+      onRequestQuit: () => void
+    ) {
+      const store = createMockTranscriptStore(onWritePty, onRequestQuit);
+      store.dispatch({
+        type: 'TELEMETRY_EVENT',
+        event: {
+          type: 'DECISION_PROMPT',
+          promptKind: 'ask_question',
+          headline: 'Select rate limiter strategy',
+          question: 'Which strategy?',
+          options: [
+            { index: 1, label: 'Token bucket' },
+            { index: 2, label: 'Leaky bucket' },
+          ],
+          timestamp: new Date().toISOString(),
+        },
+        elapsedFormatted: '0s',
+      });
+      return store;
+    }
+
+    it('renders a full-width horizontal rule in the empty CHAT state', () => {
+      const { lastFrame } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      expect(lastFrame() ?? '').toMatch(/─{10,}/);
+    });
+
+    it('renders tee joints and a vertical split divider when the rail is side-by-side', () => {
+      const { lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toMatch(/─+┬─+/);
+      expect(frame).toMatch(/─+┴─+/);
+      expect(
+        frame.split('\n').some((line) => line.trim() === '│')
+      ).toBe(true);
+    });
+
+    it('uses ASCII glyphs for the frame when AGYSUP_ASCII is set', () => {
+      const { lastFrame } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+          env={{ AGYSUP_ASCII: '1' } as NodeJS.ProcessEnv}
+        />
+      );
+
+      expect(lastFrame() ?? '').toMatch(/-{10,}/);
+    });
+
+    it('collapses a Windows CRLF pair into one chat submission', () => {
+      const onWritePty = vi.fn();
+      const { stdin } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          onWritePty={onWritePty}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      stdin.write('hello\r\n');
+
+      expect(onWritePty).toHaveBeenCalledTimes(1);
+      expect(onWritePty).toHaveBeenCalledWith('hello\r');
+    });
+
+    it('does not answer a focused decision from the trailing \\n of a CRLF pair', () => {
+      const onWritePty = vi.fn();
+      const store = decisionStore(onWritePty, vi.fn());
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          transcriptStore={store}
+          onWritePty={onWritePty}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      expect(lastFrame()).toContain('1 needs you');
+
+      // Enter TEAM (rail focused), then send a single CRLF chunk.
+      stdin.write('\t');
+      stdin.write('\r\n');
+
+      expect(onWritePty).not.toHaveBeenCalled();
+      expect(lastFrame()).toContain('1 needs you');
+    });
+
+    it('ignores digit selections beyond the decision option count and shows the real count', async () => {
+      const onWritePty = vi.fn();
+      const store = decisionStore(onWritePty, vi.fn());
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={sampleSnapshot}
+          ledger={sampleLedger}
+          transcriptStore={store}
+          onWritePty={onWritePty}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('1 2 choose');
+      expect(frame).not.toContain('1 2 3 choose');
+
+      stdin.write('5');
+      stdin.write('\r');
+
+      expect(onWritePty).toHaveBeenCalledWith('\r');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(lastFrame()).toContain('You chose: Token bucket');
+      expect(lastFrame()).not.toContain('Option 5');
+    });
+
+    it('navigates the command palette with arrows and Tab autocompletes without entering TEAM', () => {
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      stdin.write('/');
+      const openFrame = lastFrame() ?? '';
+      expect(openFrame).toContain('/spec');
+      expect(openFrame).toContain('/plan');
+
+      stdin.write('\x1b[B');
+      stdin.write('\t');
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toMatch(/›\s+\/plan/);
+      expect(frame).not.toContain('↑ ↓ select');
+    });
+
+    it('shows the takeover return instruction once, from the footer only', () => {
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      stdin.write('\x14');
+      const frame = lastFrame() ?? '';
+      const instruction =
+        "You are typing into the agent's terminal. Press Ctrl+] to return.";
+      expect(frame.split(instruction).length - 1).toBe(1);
+    });
+
+    it('executes the highlighted palette command on Enter', () => {
+      const { stdin, lastFrame } = render(
+        <App
+          snapshot={runningSnapshot}
+          ledger={sampleLedger}
+          onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()}
+          dimensions={{ columns: 120, rows: 24 }}
+        />
+      );
+
+      stdin.write('/');
+      stdin.write('\x1b[B');
+      stdin.write('\r');
+
+      expect(lastFrame()).toContain('test-plan.md');
+    });
+  });
+
   describe('Mode transitions', () => {
     const runningSnapshot: TelemetrySnapshot = {
       ...sampleSnapshot,

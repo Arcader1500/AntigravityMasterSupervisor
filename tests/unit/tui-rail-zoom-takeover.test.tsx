@@ -672,6 +672,17 @@ describe('TakeoverView component', () => {
     expect(frame).toContain('(No terminal output yet)');
   });
 
+  it('hides the banner when showBanner is false while keeping terminal lines', () => {
+    const { lastFrame } = render(
+      <TakeoverView lines={['Line 1']} theme={theme} showBanner={false} />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain(
+      "You are typing into the agent's terminal. Press Ctrl+] to return."
+    );
+    expect(frame).toContain('Line 1');
+  });
+
   it('slices terminal output to maxRows', () => {
     const lines = Array.from({ length: 30 }, (_, i) => `Output line ${i + 1}`);
     const { lastFrame } = render(
