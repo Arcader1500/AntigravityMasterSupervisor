@@ -7,6 +7,7 @@ export interface FooterBarProps {
   // Conversational props
   mode?: 'CHAT' | 'TEAM' | 'ZOOM' | 'TAKEOVER';
   hasFocusedDecision?: boolean;
+  decisionOptionCount?: number;
   isPaused?: boolean;
   confirmingQuit?: boolean;
   activeOverlay?: null | 'spec' | 'plan' | 'audit' | 'raw';
@@ -21,6 +22,7 @@ export interface FooterBarProps {
 export const FooterBar: React.FC<FooterBarProps> = ({
   mode,
   hasFocusedDecision,
+  decisionOptionCount,
   isPaused,
   confirmingQuit,
   activeOverlay,
@@ -153,10 +155,15 @@ export const FooterBar: React.FC<FooterBarProps> = ({
 
   // mode === 'CHAT' or default
   if (hasFocusedDecision) {
+    const count =
+      decisionOptionCount && decisionOptionCount > 0
+        ? Math.min(9, decisionOptionCount)
+        : 3;
+    const digits = Array.from({ length: count }, (_, i) => i + 1).join(' ');
     return (
       <Box paddingX={1}>
         <Text color={activeTheme.colors.dim}>
-          1 2 3 choose   Enter send   Esc ask me later
+          {`${digits} choose   Enter send   Esc ask me later`}
         </Text>
       </Box>
     );

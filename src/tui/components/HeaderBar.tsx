@@ -135,24 +135,31 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   const activeTheme = theme ?? resolveTheme();
   const activeGlyphs = glyphs ?? resolveGlyphs();
 
-  const specDone = Boolean(specApproved);
-  const specCurrent = !specDone && status !== 'COMPLETED';
-
-  const planDone = Boolean(planApproved);
-  const planCurrent =
-    Boolean(specApproved && !planApproved) &&
-    status !== 'COMPLETED' &&
-    status !== 'EXECUTING' &&
-    status !== 'VERIFYING';
+  const verifyDone = status === 'COMPLETED';
+  const verifyCurrent = status === 'VERIFYING';
 
   const buildDone = status === 'COMPLETED' || status === 'VERIFYING';
   const buildCurrent =
-    (Boolean(specApproved && planApproved) || status === 'EXECUTING') &&
-    status !== 'COMPLETED' &&
-    status !== 'VERIFYING';
+    !verifyCurrent &&
+    !verifyDone &&
+    (Boolean(specApproved && planApproved) ||
+      (status === 'EXECUTING' && (totalTasks ?? 0) > 0));
 
-  const verifyDone = status === 'COMPLETED';
-  const verifyCurrent = status === 'VERIFYING';
+  const planDone = Boolean(planApproved) || buildCurrent || buildDone;
+  const planCurrent =
+    !buildCurrent &&
+    !buildDone &&
+    !verifyCurrent &&
+    !verifyDone &&
+    Boolean(specApproved && !planApproved);
+
+  const specDone = Boolean(specApproved) || planDone;
+  const specCurrent =
+    !specDone &&
+    !planCurrent &&
+    !buildCurrent &&
+    !verifyCurrent &&
+    status !== 'COMPLETED';
 
   let waveOrTaskText = '';
   if (currentWave !== undefined && totalWaves !== undefined) {

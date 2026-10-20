@@ -49,12 +49,24 @@ export function deriveTeamMembers(
   ledgerStatus?: string
 ): TeamMemberRow[] {
   const tasks = snapshot.tasks ?? (snapshot as any).planTasks ?? [];
-  const isPlanning =
-    (ledgerStatus === 'PLANNING' || ledgerStatus === 'CHECKPOINT_SPEC') &&
-    tasks.length === 0;
 
   const rawActive = (snapshot as any).activeAgent ?? snapshot.activeSubagent ?? null;
   const activeRole = typeof rawActive === 'string' ? rawActive.toLowerCase() : null;
+
+  const isExecutionSubagent =
+    activeRole !== null &&
+    (activeRole.includes('implementer') ||
+      activeRole.includes('reviewer') ||
+      activeRole.includes('verifier') ||
+      activeRole.includes('orchestrator'));
+
+  const isPlanning =
+    tasks.length === 0 &&
+    !isExecutionSubagent &&
+    (ledgerStatus === 'IDLE' ||
+      ledgerStatus === 'INITIALIZING' ||
+      ledgerStatus === 'PLANNING' ||
+      ledgerStatus === 'CHECKPOINT_SPEC');
 
   const isWaiting = pendingDecisionCount > 0 || Boolean(snapshot.waitingForInput);
   const elapsedFormatted =
@@ -333,8 +345,7 @@ export const TeamRail: React.FC<TeamRailProps> = ({
             })()
           ) : null}
         </Box>
-      ) : (ledgerStatus === 'PLANNING' || ledgerStatus === 'CHECKPOINT_SPEC') &&
-        tasks.length === 0 ? (
+      ) : tasks.length === 0 && ledgerStatus !== 'COMPLETED' ? (
         <Box marginTop={1} flexDirection="column" width={width}>
           <Text color={activeTheme.colors.text}>Tasks</Text>
           <Text color={activeTheme.colors.dim}>

@@ -134,6 +134,37 @@ describe('HeaderBar conversational component', () => {
     expect(frame).toContain('Paused');
   });
 
+  it('renders Spec as the only active phase on a fresh PLANNING session before spec approval', () => {
+    const { lastFrame } = render(
+      <HeaderBar
+        branch="feat/rate-limit"
+        status="PLANNING"
+        specApproved={false}
+        planApproved={false}
+        totalTasks={0}
+        glyphs={unicodeGlyphs}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Spec ▸  Plan  Build  Verify');
+  });
+
+  it('keeps Spec and Build phases mutually exclusive during EXECUTING without approvals or tasks', () => {
+    const { lastFrame } = render(
+      <HeaderBar
+        branch="feat/rate-limit"
+        status="EXECUTING"
+        specApproved={false}
+        planApproved={false}
+        totalTasks={0}
+        glyphs={unicodeGlyphs}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Spec ▸');
+    expect(frame).not.toContain('Build ▸');
+  });
+
   it('preserves legacy HeaderBar output when only legacy props are passed', () => {
     const { lastFrame } = render(
       <HeaderBar
@@ -176,6 +207,29 @@ describe('FooterBar conversational component', () => {
     const frame = lastFrame() ?? '';
     expect(frame).toContain('1 2 3 choose   Enter send   Esc ask me later');
     expect(frame).not.toContain('[1] Main Status');
+  });
+
+  it('lists one digit per decision option and defaults to three digits', () => {
+    const twoOptions = render(
+      <FooterBar mode="CHAT" hasFocusedDecision={true} decisionOptionCount={2} />
+    );
+    expect(twoOptions.lastFrame() ?? '').toContain(
+      '1 2 choose   Enter send   Esc ask me later'
+    );
+
+    const fourOptions = render(
+      <FooterBar mode="CHAT" hasFocusedDecision={true} decisionOptionCount={4} />
+    );
+    expect(fourOptions.lastFrame() ?? '').toContain(
+      '1 2 3 4 choose   Enter send   Esc ask me later'
+    );
+
+    const defaultOptions = render(
+      <FooterBar mode="CHAT" hasFocusedDecision={true} />
+    );
+    expect(defaultOptions.lastFrame() ?? '').toContain(
+      '1 2 3 choose   Enter send   Esc ask me later'
+    );
   });
 
   it('renders TEAM mode hints', () => {

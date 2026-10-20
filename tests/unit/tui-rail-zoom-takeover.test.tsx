@@ -2,13 +2,16 @@ import React from 'react';
 import { describe, it, expect } from 'vitest';
 import { render } from 'ink-testing-library';
 import type { TelemetrySnapshot, PlanTaskItem, AgentStepItem } from '../../src/telemetry/types.js';
+import type { TranscriptItem } from '../../src/tui/narrator.js';
 import { resolveTheme } from '../../src/tui/theme.js';
 import { resolveGlyphs } from '../../src/tui/glyphs.js';
+import { formatBlockedFallbackReason } from '../../src/tui/narrator-copy.js';
 import {
   TeamRail,
   deriveTeamMembers,
   type TeamMemberRow,
 } from '../../src/tui/components/TeamRail.js';
+import { FailureCard } from '../../src/tui/components/FailureCard.js';
 import {
   ZoomView,
   formatAgentStep,
@@ -52,6 +55,15 @@ describe('deriveTeamMembers', () => {
     expect(members[0]).toMatchObject({ id: 'planner', role: 'planner', isMain: true, statusText: 'running' });
     expect(members[1]).toMatchObject({ id: 'researcher', role: 'researcher', isMain: false, statusText: 'idle' });
     expect(members[2]).toMatchObject({ id: 'plan-critic', role: 'plan-critic', isMain: false, statusText: 'idle' });
+  });
+
+  it('returns planning roles on IDLE with no tasks and no active subagent', () => {
+    const snapshot = createMockSnapshot({
+      tasks: [],
+      activeSubagent: null,
+    });
+    const members = deriveTeamMembers(snapshot, 0, false, 'IDLE');
+    expect(members.map((m) => m.role)).toEqual(['planner', 'researcher', 'plan-critic']);
   });
 
   it('marks active member as paused, needs you when pendingDecisionCount > 0 or waitingForInput', () => {
@@ -109,6 +121,45 @@ describe('deriveTeamMembers', () => {
     const impl = members.find((m) => m.role === 'implementer');
     expect(impl?.statusText).toBe('paused');
     expect(impl?.needsYou).toBe(false);
+  });
+});
+
+describe('FailureCard quoting', () => {
+  const theme = resolveTheme();
+
+  const baseItem: Extract<TranscriptItem, { kind: 'FailureCard' }> = {
+    id: 'f1',
+    kind: 'FailureCard',
+    role: 'implementer',
+    headline: 'The implementer is blocked',
+    reason: formatBlockedFallbackReason('implementer'),
+    failureKind: 'blocked',
+    options: [{ index: 1, label: 'Retry', action: 'retry' }],
+    status: 'pending',
+    selectedOptionIndex: 1,
+    timestamp: '10:00:00',
+  };
+
+  it('does not wrap the fallback blocked reason in quotation marks', () => {
+    const { lastFrame } = render(<FailureCard item={baseItem} theme={theme} />);
+    const frame = (lastFrame() ?? '')
+      .replace(/[│╭╮╰╯─]/g, ' ')
+      .replace(/\s+/g, ' ');
+    expect(frame).toContain(
+      'The implementer reported it is blocked and did not say why. Open the agent to read its last output.'
+    );
+    expect(frame).not.toContain('"The implementer');
+  });
+
+  it('still quotes actual error lines', () => {
+    const { lastFrame } = render(
+      <FailureCard
+        item={{ ...baseItem, reason: 'Failed to connect to redis' }}
+        theme={theme}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('"Failed to connect to redis"');
   });
 });
 
@@ -215,6 +266,20 @@ describe('TeamRail component', () => {
     );
     const frame = lastFrame() ?? '';
     expect(frame).toContain('planner');
+    expect(frame.replace(/\n\s*/g, ' ')).toContain('Tasks appear once the plan is approved.');
+  });
+
+  it('renders the empty tasks message on IDLE with no tasks', () => {
+    const { lastFrame } = render(
+      <TeamRail
+        members={[]}
+        tasks={[]}
+        ledgerStatus="IDLE"
+        glyphs={unicodeGlyphs}
+        theme={theme}
+      />
+    );
+    const frame = lastFrame() ?? '';
     expect(frame.replace(/\n\s*/g, ' ')).toContain('Tasks appear once the plan is approved.');
   });
 
