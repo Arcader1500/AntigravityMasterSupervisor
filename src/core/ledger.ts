@@ -29,13 +29,24 @@ export function saveLedgerAtomic(projectDir: string, data: SupervisorLedger): vo
 }
 
 /**
+ * Options controlling ledger initialization.
+ */
+export interface InitLedgerOptions {
+  reset?: boolean;
+}
+
+/**
  * Initializes a new supervisor_state.json file if one does not exist,
  * or returns the existing ledger if already present.
+ * When `reset` is true, an existing ledger is overwritten with a fresh one.
  */
-export function initLedger(projectDir: string): SupervisorLedger {
+export function initLedger(
+  projectDir: string,
+  options?: InitLedgerOptions
+): SupervisorLedger {
   const ledgerPath = getLedgerPath(projectDir);
 
-  if (fs.existsSync(ledgerPath)) {
+  if (!options?.reset && fs.existsSync(ledgerPath)) {
     return loadLedger(projectDir);
   }
 

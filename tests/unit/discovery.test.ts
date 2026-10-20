@@ -85,6 +85,129 @@ describe('Discovery Preflight', () => {
     });
   });
 
+  describe('checkGitRepo branch resolution fallback', () => {
+    const isWindows = process.platform === 'win32';
+
+    function realGitPath(): string {
+      const out = isWindows
+        ? execSync('where.exe git', { encoding: 'utf-8' })
+        : execSync('command -v git', { encoding: 'utf-8' });
+      const first = out
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean);
+      if (!first) {
+        throw new Error('git executable not found on PATH');
+      }
+      return first;
+    }
+
+    function createRepo(name: string): string {
+      const repoDir = path.join(tempBaseDir, name);
+      fs.mkdirSync(repoDir);
+      execSync('git init', { cwd: repoDir, stdio: 'ignore' });
+      execSync('git config user.email "test@example.com"', { cwd: repoDir, stdio: 'ignore' });
+      execSync('git config user.name "Test"', { cwd: repoDir, stdio: 'ignore' });
+      fs.writeFileSync(path.join(repoDir, 'README.md'), '# fixture\n');
+      execSync('git add README.md', { cwd: repoDir, stdio: 'ignore' });
+      execSync('git commit -m "initial commit"', { cwd: repoDir, stdio: 'ignore' });
+      return repoDir;
+    }
+
+    /**
+     * Installs a git shim on PATH that fails `git branch --show-current`
+     * and/or `git rev-parse --abbrev-ref HEAD` while forwarding everything
+     * else to the real git binary.
+     */
+    function installGitShim(options: {
+      failShowCurrent: boolean;
+      failAbbrevRef: boolean;
+    }): void {
+      const shimDir = fs.mkdtempSync(path.join(tempBaseDir, 'git-shim-'));
+      const realGit = realGitPath();
+
+      if (isWindows) {
+        const lines = [
+          '@echo off',
+          'if "%~1"=="branch" if "%~2"=="--show-current" goto showcurrent',
+          'if "%~1"=="rev-parse" if "%~2"=="--abbrev-ref" goto abbrev',
+          `"${realGit}" %*`,
+          'exit /b %ERRORLEVEL%',
+          ':showcurrent',
+          ...(options.failShowCurrent
+            ? ['echo Unknown option --show-current 1>&2', 'exit /b 129']
+            : ['exit /b 0']),
+          ':abbrev',
+          ...(options.failAbbrevRef
+            ? ['echo fatal: ambiguous argument 1>&2', 'exit /b 128']
+            : [`"${realGit}" %*`, 'exit /b %ERRORLEVEL%']),
+        ];
+        fs.writeFileSync(path.join(shimDir, 'git.cmd'), `${lines.join('\r\n')}\r\n`);
+      } else {
+        const lines = [
+          '#!/bin/sh',
+          'if [ "$1" = "branch" ] && [ "$2" = "--show-current" ]; then',
+          ...(options.failShowCurrent
+            ? ['  echo "error: unknown option" >&2', '  exit 129']
+            : ['  exit 0']),
+          'fi',
+          'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then',
+          ...(options.failAbbrevRef
+            ? ['  echo "fatal: ambiguous argument" >&2', '  exit 128']
+            : [`  exec "${realGit}" "$@"`]),
+          'fi',
+          `exec "${realGit}" "$@"`,
+        ];
+        fs.writeFileSync(path.join(shimDir, 'git'), `${lines.join('\n')}\n`, { mode: 0o755 });
+      }
+
+      process.env.PATH = `${shimDir}${path.delimiter}${process.env.PATH || ''}`;
+      if (isWindows) {
+        process.env.Path = process.env.PATH;
+      }
+    }
+
+    it('falls back to rev-parse when git branch --show-current throws', () => {
+      const repoDir = createRepo('branch-throws');
+      const expectedBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: repoDir,
+        encoding: 'utf-8',
+      }).trim();
+
+      installGitShim({ failShowCurrent: true, failAbbrevRef: false });
+
+      const res = checkGitRepo(repoDir);
+      expect(res.isGit).toBe(true);
+      expect(res.branch).toBe(expectedBranch);
+      expect(res.branch).not.toBe('HEAD');
+    });
+
+    it('falls back to rev-parse when git branch --show-current returns empty output', () => {
+      const repoDir = createRepo('branch-empty');
+      const expectedBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: repoDir,
+        encoding: 'utf-8',
+      }).trim();
+
+      installGitShim({ failShowCurrent: false, failAbbrevRef: false });
+
+      const res = checkGitRepo(repoDir);
+      expect(res.isGit).toBe(true);
+      expect(res.branch).toBe(expectedBranch);
+      expect(res.branch).not.toBe('HEAD');
+    });
+
+    it("falls back to 'HEAD' only when both branch commands fail", () => {
+      const repoDir = createRepo('branch-both-fail');
+
+      installGitShim({ failShowCurrent: true, failAbbrevRef: true });
+
+      const res = checkGitRepo(repoDir);
+      expect(res.isGit).toBe(true);
+      expect(res.branch).toBe('HEAD');
+    });
+  });
+
   describe('findAgyBinary', () => {
     it('prefers explicit binary override when provided and file exists', () => {
       const mockBin = path.join(tempBaseDir, 'mock-bin-path');

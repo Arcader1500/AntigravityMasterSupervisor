@@ -53,6 +53,57 @@ describe('Workspace Ledger', () => {
     expect(ledger2.activeAgent).toBe('planner');
   });
 
+  it('preserves the existing ledger when reset is not requested', () => {
+    const original = initLedger(testDir);
+    updateLedger(testDir, (l) => {
+      l.status = 'EXECUTING';
+      l.checkpoints.spec = { status: 'PENDING' };
+      l.events.push({
+        timestamp: new Date().toISOString(),
+        level: 'WARN',
+        message: 'kept event',
+      });
+    });
+
+    const preserved = initLedger(testDir);
+    expect(preserved.sessionId).toBe(original.sessionId);
+    expect(preserved.status).toBe('EXECUTING');
+    expect(preserved.checkpoints.spec.status).toBe('PENDING');
+    expect(preserved.events).toHaveLength(1);
+  });
+
+  it('resets an existing ledger when reset option is true', () => {
+    const original = initLedger(testDir);
+    updateLedger(testDir, (l) => {
+      l.status = 'EXECUTING';
+      l.activeAgent = 'executor';
+      l.checkpoints.spec = { status: 'PENDING', path: 'docs/specs/spec.md' };
+      l.checkpoints.plan = { status: 'APPROVED' };
+      l.events.push({
+        timestamp: new Date().toISOString(),
+        level: 'INFO',
+        message: 'old session event',
+      });
+    });
+
+    const reset = initLedger(testDir, { reset: true });
+
+    expect(reset.sessionId).not.toBe(original.sessionId);
+    expect(reset.status).toBe('IDLE');
+    expect(reset.activeAgent).toBeNull();
+    expect(reset.checkpoints.spec).toEqual({ status: 'UNINITIALIZED' });
+    expect(reset.checkpoints.plan).toEqual({ status: 'UNINITIALIZED' });
+    expect(reset.events).toEqual([]);
+    expect(reset.projectPath).toBe(path.resolve(testDir));
+
+    const onDisk = loadLedger(testDir);
+    expect(onDisk.sessionId).toBe(reset.sessionId);
+    expect(onDisk.status).toBe('IDLE');
+    expect(onDisk.activeAgent).toBeNull();
+    expect(onDisk.checkpoints.spec).toEqual({ status: 'UNINITIALIZED' });
+    expect(onDisk.events).toEqual([]);
+  });
+
   it('loads existing ledger from disk', () => {
     initLedger(testDir);
     updateLedger(testDir, (l) => {

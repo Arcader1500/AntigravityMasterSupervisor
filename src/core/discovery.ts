@@ -62,19 +62,22 @@ export function checkGitRepo(targetDir: string): GitCheckResult {
 
       if (branchRaw) {
         branch = branchRaw;
-      } else {
-        try {
-          branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      }
+    } catch {
+      // Fall through to rev-parse fallback
+    }
+
+    if (!branch) {
+      try {
+        branch =
+          execSync('git rev-parse --abbrev-ref HEAD', {
             cwd: targetDir,
             encoding: 'utf-8',
             stdio: ['ignore', 'pipe', 'pipe'],
-          }).trim();
-        } catch {
-          branch = 'HEAD';
-        }
+          }).trim() || undefined;
+      } catch {
+        branch = 'HEAD';
       }
-    } catch {
-      branch = undefined;
     }
 
     let isClean = true;
