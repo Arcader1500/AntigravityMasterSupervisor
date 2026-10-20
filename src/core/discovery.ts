@@ -76,6 +76,7 @@ export function checkGitRepo(targetDir: string): GitCheckResult {
             stdio: ['ignore', 'pipe', 'pipe'],
           }).trim() || undefined;
       } catch {
+        // Plan test spec requires 'HEAD' here, not undefined, to match pre-check behavior.
         branch = 'HEAD';
       }
     }

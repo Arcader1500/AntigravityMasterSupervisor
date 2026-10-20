@@ -82,6 +82,7 @@ export type TranscriptItem =
       role: string;
       headline: string;
       reason: string;
+      isFallback?: boolean;
       failureKind: 'blocked' | 'needs_context' | 'verify_failed' | 'pty_exit';
       options: Array<{ index: number; label: string; action: 'retry' | 'skip' | 'takeover' | 'quit' }>;
       status: 'pending' | 'deferred' | 'resolved';
@@ -449,12 +450,14 @@ function reduceTelemetryEvent(
           failureKind = 'verify_failed';
         }
 
-        const reason =
+        const reportedReason =
           event.reason && event.reason.trim()
             ? event.reason.trim()
             : lastErrorLine && lastErrorLine.trim()
             ? lastErrorLine.trim()
-            : formatBlockedFallbackReason(event.role);
+            : null;
+        const isFallback = reportedReason === null;
+        const reason = reportedReason ?? formatBlockedFallbackReason(event.role);
 
         const headline = taskNumber
           ? `Task ${taskNumber} is ${failureKind === 'blocked' ? 'blocked' : failureKind === 'needs_context' ? 'needs context' : 'failed'}`
@@ -467,6 +470,7 @@ function reduceTelemetryEvent(
           role: event.role,
           headline,
           reason,
+          isFallback,
           failureKind,
           options: [
             { index: 1, label: 'Retry the task', action: 'retry' },

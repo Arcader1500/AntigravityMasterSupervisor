@@ -30,6 +30,7 @@ export async function runCommand(
 
   // Initialize supervisor state ledger if not present
   const ledger = initLedger(projectDir, { reset: !options?.resume });
+  // 0 disables the mtime filter so a resumed session picks up all historical artifacts.
   const sessionStartedAt = options?.resume
     ? 0
     : Date.parse(ledger.createdAt) || Date.now();

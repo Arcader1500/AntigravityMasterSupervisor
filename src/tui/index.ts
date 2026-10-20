@@ -286,6 +286,7 @@ export function mountSupervisorTui(
     }
 
     if (process.stdout.isTTY) {
+      // Exit alt-screen
       process.stdout.write('\x1b[?1049l');
     }
 
@@ -325,6 +326,7 @@ export function mountSupervisorTui(
   });
 
   if (process.stdout.isTTY) {
+    // Enter alt-screen
     process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H');
   }
 

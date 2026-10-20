@@ -133,6 +133,7 @@ describe('FailureCard quoting', () => {
     role: 'implementer',
     headline: 'The implementer is blocked',
     reason: formatBlockedFallbackReason('implementer'),
+    isFallback: true,
     failureKind: 'blocked',
     options: [{ index: 1, label: 'Retry', action: 'retry' }],
     status: 'pending',
@@ -154,7 +155,7 @@ describe('FailureCard quoting', () => {
   it('still quotes actual error lines', () => {
     const { lastFrame } = render(
       <FailureCard
-        item={{ ...baseItem, reason: 'Failed to connect to redis' }}
+        item={{ ...baseItem, reason: 'Failed to connect to redis', isFallback: false }}
         theme={theme}
       />
     );

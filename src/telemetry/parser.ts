@@ -314,6 +314,7 @@ export class TelemetryParser {
     const messageMatch = trimmed.match(MESSAGE_REGEX);
     const isMessage = messageMatch !== null;
     const verdictMatch = trimmed.match(VERDICT_REGEX);
+    // Only treat bare verdict lines as completion while we have an active subagent to attribute them to.
     const standaloneVerdictMatch =
       this.state.activeSubagent !== null ? trimmed.match(STANDALONE_VERDICT_REGEX) : null;
     const isVerdict = verdictMatch !== null || standaloneVerdictMatch !== null;

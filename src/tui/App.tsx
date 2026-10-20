@@ -328,6 +328,7 @@ export const App: React.FC<AppProps> = ({
     composerText.length === 0
       ? 1
       : wrapComposerLines(composerText, columns - 4, 4).length;
+  // 5 = HeaderBar + top rule + bottom rule + FooterBar + 1 extra for the ZOOM footer wrapping to two lines at 80 columns
   const bodyRows = Math.max(
     6,
     rows -

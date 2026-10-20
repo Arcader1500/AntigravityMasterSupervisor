@@ -135,6 +135,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   const activeTheme = theme ?? resolveTheme();
   const activeGlyphs = glyphs ?? resolveGlyphs();
 
+  // Phase flags are mutually exclusive: exactly one of done/current can be true across Spec→Plan→Build→Verify.
   const verifyDone = status === 'COMPLETED';
   const verifyCurrent = status === 'VERIFYING';
 

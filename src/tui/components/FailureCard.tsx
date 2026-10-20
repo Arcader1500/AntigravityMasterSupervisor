@@ -32,9 +32,7 @@ export const FailureCard: React.FC<FailureCardProps> = ({
   const isMonochrome = activeTheme.mode === 'monochrome';
   const headlinePrefix = isMonochrome ? '[!] ' : '';
 
-  const isFallbackReason = item.reason.endsWith(
-    'Open the agent to read its last output.'
-  );
+  const isFallbackReason = item.isFallback === true;
   const reason =
     isFallbackReason || (item.reason.startsWith('"') && item.reason.endsWith('"'))
       ? item.reason
