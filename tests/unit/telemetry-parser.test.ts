@@ -53,7 +53,7 @@ describe('TelemetryParser (Pure Passive Regex)', () => {
       expect(lastItem.message).toContain('DONE');
     });
 
-    it('detects [Message] or SYSTEM_MESSAGE and records completion', () => {
+    it('detects [Message] sender completion and clears activeSubagent', () => {
       const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
       parser.processLine('invoke_subagent -> verifier');
       expect(parser.getState().activeSubagent).toBe('verifier');
@@ -63,6 +63,34 @@ describe('TelemetryParser (Pure Passive Regex)', () => {
 
       const items = parser.getState().activityFeed;
       expect(items.some((i) => i.message.includes('All tests passed') || i.message.includes('verifier'))).toBe(true);
+    });
+
+    it('ignores bare SYSTEM_MESSAGE wrapper tags and completes only on [Message] or verdict', () => {
+      const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      parser.onEvent((e) => events.push(e));
+
+      parser.processLine('invoke_subagent -> researcher');
+      expect(parser.getState().activeSubagent).toBe('researcher');
+      events.length = 0;
+
+      parser.processLine('<SYSTEM_MESSAGE>');
+      expect(parser.getState().activeSubagent).toBe('researcher');
+
+      parser.processLine('</SYSTEM_MESSAGE>');
+      expect(parser.getState().activeSubagent).toBe('researcher');
+      expect(events.some((e) => e.type === 'SUBAGENT_COMPLETED')).toBe(false);
+
+      parser.processLine('[Message] timestamp=2026-10-18T16:32:17Z sender=researcher priority=MESSAGE_PRIORITY_HIGH content=Findings attached');
+      expect(parser.getState().activeSubagent).toBeNull();
+
+      parser.processLine('invoke_subagent -> researcher');
+      parser.processLine('<SYSTEM_MESSAGE>');
+      expect(parser.getState().activeSubagent).toBe('researcher');
+
+      parser.processLine('**Status:** DONE');
+      expect(parser.getState().activeSubagent).toBeNull();
+      expect(events.filter((e) => e.type === 'SUBAGENT_COMPLETED')).toHaveLength(2);
     });
 
     it('detects various status verdicts (DONE_WITH_CONCERNS, BLOCKED, NEEDS_CONTEXT, READY)', () => {

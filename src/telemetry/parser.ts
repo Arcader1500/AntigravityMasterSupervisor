@@ -29,7 +29,6 @@ const KNOWN_ROLES = [
 ];
 
 const MESSAGE_REGEX = /\[Message\]\s+timestamp=.*?sender=([^\s]+)/i;
-const SYSTEM_MSG_REGEX = /<?SYSTEM_MESSAGE>?/i;
 const VERDICT_REGEX =
   /(?:\*\*Status:\*\*|\bStatus:|\bVerdict:)\s*(DONE_WITH_CONCERNS|DONE|NEEDS_CONTEXT|BLOCKED|READY|APPROVE|REQUEST_CHANGES|PASS|FAIL)\b/i;
 const STANDALONE_VERDICT_REGEX =
@@ -314,13 +313,12 @@ export class TelemetryParser {
     // 2. Subagent completion
     const messageMatch = trimmed.match(MESSAGE_REGEX);
     const isMessage = messageMatch !== null;
-    const isSystemMsg = SYSTEM_MSG_REGEX.test(trimmed);
     const verdictMatch = trimmed.match(VERDICT_REGEX);
     const standaloneVerdictMatch =
       this.state.activeSubagent !== null ? trimmed.match(STANDALONE_VERDICT_REGEX) : null;
     const isVerdict = verdictMatch !== null || standaloneVerdictMatch !== null;
 
-    if (isMessage || isSystemMsg || isVerdict) {
+    if (isMessage || isVerdict) {
       const role = this.state.activeSubagent
         ? this.state.activeSubagent.toLowerCase()
         : (messageMatch?.[1]?.toLowerCase() ?? this.mainAgent.toLowerCase());
