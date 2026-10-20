@@ -107,11 +107,19 @@ describe('glyph resolution', () => {
       prompt: '›',
       treeBranch: '├',
       treeLast: '└',
+      hr: '─',
+      vr: '│',
+      teeDown: '┬',
+      teeUp: '┴',
       spinnerFrames: ['▸', '▹', '▸', '▹'],
     });
 
-    const glyphsLinux = resolveGlyphs({ env: {}, platform: 'linux' });
+    const glyphsLinux = resolveGlyphs({ env: { WT_SESSION: '1' }, platform: 'linux' });
     expect(glyphsLinux.done).toBe('✓');
+    expect(glyphsLinux.hr).toBe('─');
+    expect(glyphsLinux.vr).toBe('│');
+    expect(glyphsLinux.teeDown).toBe('┬');
+    expect(glyphsLinux.teeUp).toBe('┴');
     expect(glyphsLinux.spinnerFrames).toEqual(['▸', '▹', '▸', '▹']);
 
     const glyphsTermProgram = resolveGlyphs({
@@ -141,11 +149,19 @@ describe('glyph resolution', () => {
       prompt: '>',
       treeBranch: '|-',
       treeLast: '`-',
+      hr: '-',
+      vr: '|',
+      teeDown: '+',
+      teeUp: '+',
       spinnerFrames: ['>', '-', '>', '-'],
     };
 
     const glyphsAgySupAscii = resolveGlyphs({ env: { AGYSUP_ASCII: '1' } });
     expect(glyphsAgySupAscii).toEqual(asciiGlyphs);
+    expect(glyphsAgySupAscii.hr).toBe('-');
+    expect(glyphsAgySupAscii.vr).toBe('|');
+    expect(glyphsAgySupAscii.teeDown).toBe('+');
+    expect(glyphsAgySupAscii.teeUp).toBe('+');
 
     const glyphsLegacyWin = resolveGlyphs({ env: {}, platform: 'win32' });
     expect(glyphsLegacyWin).toEqual(asciiGlyphs);

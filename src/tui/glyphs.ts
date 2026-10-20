@@ -5,6 +5,10 @@ export interface GlyphSet {
   prompt: string;
   treeBranch: string;
   treeLast: string;
+  hr: string;
+  vr: string;
+  teeDown: string;
+  teeUp: string;
   spinnerFrames: readonly [string, string, string, string];
 }
 
@@ -39,6 +43,10 @@ export function resolveGlyphs(options?: {
       prompt: '>',
       treeBranch: '|-',
       treeLast: '`-',
+      hr: '-',
+      vr: '|',
+      teeDown: '+',
+      teeUp: '+',
       spinnerFrames: ['>', '-', '>', '-'],
     };
   }
@@ -50,6 +58,10 @@ export function resolveGlyphs(options?: {
     prompt: '›',
     treeBranch: '├',
     treeLast: '└',
+    hr: '─',
+    vr: '│',
+    teeDown: '┬',
+    teeUp: '┴',
     spinnerFrames: ['▸', '▹', '▸', '▹'],
   };
 }
