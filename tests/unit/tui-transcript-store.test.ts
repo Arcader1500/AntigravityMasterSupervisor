@@ -343,6 +343,25 @@ describe('TranscriptStore', () => {
       expect(ptyWrites).toHaveLength(0);
       store.dispose();
     });
+
+    it('defers and refocuses a focused FailureCard', () => {
+      const store = createStore();
+      store.handlePtyExit(1);
+
+      const focusedFailure = store.getSnapshot().focusedDecision;
+      expect(focusedFailure?.kind).toBe('FailureCard');
+      expect(focusedFailure?.id).toBeDefined();
+
+      store.deferFocusedDecision();
+      expect(store.getSnapshot().focusedDecision).toBeNull();
+
+      store.refocusDeferredDecision();
+      const refocused = store.getSnapshot().focusedDecision;
+      expect(refocused?.kind).toBe('FailureCard');
+      expect(refocused?.id).toBe(focusedFailure?.id);
+      expect((refocused as any)?.status).toBe('pending');
+      store.dispose();
+    });
   });
 
   describe('terminal bell deduplication', () => {

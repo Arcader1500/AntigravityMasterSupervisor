@@ -507,6 +507,40 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     expect(completion.verifierResult).toBeDefined();
   });
 
+  it('LEDGER_STATUS_CHANGED from IDLE to PLANNING at startup updates ledgerStatus without a PhaseChange item', () => {
+    const initial = createInitialNarratorState();
+    expect(initial.hasStarted).toBe(false);
+    expect(initial.tasks).toHaveLength(0);
+
+    const next = reduceNarrator(initial, {
+      type: 'LEDGER_STATUS_CHANGED',
+      prevStatus: 'IDLE',
+      status: 'PLANNING',
+      timestamp: '2026-10-19T10:00:30.000Z',
+    });
+
+    expect(next.ledgerStatus).toBe('PLANNING');
+    expect(next.items.some((i) => i.kind === 'PhaseChange')).toBe(false);
+    expect(next.items).toHaveLength(initial.items.length);
+  });
+
+  it('LEDGER_STATUS_CHANGED from IDLE to EXECUTING at startup updates ledgerStatus without a PhaseChange item', () => {
+    const initial = createInitialNarratorState();
+    expect(initial.hasStarted).toBe(false);
+    expect(initial.tasks).toHaveLength(0);
+
+    const next = reduceNarrator(initial, {
+      type: 'LEDGER_STATUS_CHANGED',
+      prevStatus: 'IDLE',
+      status: 'EXECUTING',
+      timestamp: '2026-10-19T10:00:45.000Z',
+    });
+
+    expect(next.ledgerStatus).toBe('EXECUTING');
+    expect(next.items.some((i) => i.kind === 'PhaseChange')).toBe(false);
+    expect(next.items).toHaveLength(initial.items.length);
+  });
+
   it('DECISION_PROMPT appends DecisionCard and increments pendingDecisionCount', () => {
     let state = createInitialNarratorState();
 
@@ -702,5 +736,39 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     card = state.items.find((i) => i.id === decisionId) as Extract<TranscriptItem, { kind: 'DecisionCard' }>;
     expect(card.status).toBe('pending');
     expect(state.latestBellDecisionId).toBe(decisionId);
+  });
+
+  it('DECISION_DEFERRED and DECISION_REFOCUSED work on a FailureCard', () => {
+    let state = createInitialNarratorState();
+    state = reduceNarrator(state, {
+      type: 'PTY_EXITED',
+      exitCode: 1,
+      lastErrorLine: 'fatal error',
+      timestamp: '2026-10-19T10:15:00.000Z',
+    });
+
+    const failure = state.items.find(
+      (i) => i.kind === 'FailureCard'
+    ) as Extract<TranscriptItem, { kind: 'FailureCard' }>;
+    expect(failure).toBeDefined();
+    expect(failure.status).toBe('pending');
+
+    state = reduceNarrator(state, {
+      type: 'DECISION_DEFERRED',
+      id: failure.id,
+    });
+    let card = state.items.find(
+      (i) => i.id === failure.id
+    ) as Extract<TranscriptItem, { kind: 'FailureCard' }>;
+    expect(card.status).toBe('deferred');
+
+    state = reduceNarrator(state, {
+      type: 'DECISION_REFOCUSED',
+    });
+    card = state.items.find(
+      (i) => i.id === failure.id
+    ) as Extract<TranscriptItem, { kind: 'FailureCard' }>;
+    expect(card.status).toBe('pending');
+    expect(state.latestBellDecisionId).toBe(failure.id);
   });
 });

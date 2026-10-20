@@ -394,7 +394,7 @@ export class TranscriptStore {
 
   public deferFocusedDecision(): void {
     const focused = this.getFocusedDecision();
-    if (focused && focused.kind === 'DecisionCard') {
+    if (focused) {
       this.dispatch({
         type: 'DECISION_DEFERRED',
         id: focused.id,

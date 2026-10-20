@@ -84,7 +84,7 @@ export type TranscriptItem =
       reason: string;
       failureKind: 'blocked' | 'needs_context' | 'verify_failed' | 'pty_exit';
       options: Array<{ index: number; label: string; action: 'retry' | 'skip' | 'takeover' | 'quit' }>;
-      status: 'pending' | 'resolved';
+      status: 'pending' | 'deferred' | 'resolved';
       selectedOptionIndex: number;
       resolvedText?: string;
       timestamp: string;
@@ -622,6 +622,17 @@ export function reduceNarrator(state: NarratorState, event: NarratorInputEvent):
     }
 
     case 'LEDGER_STATUS_CHANGED': {
+      // Startup transitions into PLANNING (and straight into EXECUTING with no
+      // tasks yet) are the session's initial state, not a phase the user needs
+      // narrated. Record the status without emitting a PhaseChange note.
+      if (
+        event.prevStatus === 'IDLE' &&
+        (event.status === 'PLANNING' ||
+          (event.status === 'EXECUTING' && state.tasks.length === 0 && !state.hasStarted))
+      ) {
+        return { ...state, ledgerStatus: event.status };
+      }
+
       let items = [...state.items];
       const phaseChangeText = formatPhaseChangeNote(
         event.prevStatus,
@@ -730,8 +741,10 @@ export function reduceNarrator(state: NarratorState, event: NarratorInputEvent):
 
     case 'DECISION_DEFERRED': {
       const items = state.items.map((item) => {
-        if (item.id === event.id && item.kind === 'DecisionCard') {
-          return { ...item, status: 'deferred' as const };
+        if (item.id === event.id) {
+          if (item.kind === 'DecisionCard' || item.kind === 'FailureCard') {
+            return { ...item, status: 'deferred' as const };
+          }
         }
         return item;
       });
@@ -741,7 +754,11 @@ export function reduceNarrator(state: NarratorState, event: NarratorInputEvent):
     case 'DECISION_REFOCUSED': {
       let refocusedId: string | null = null;
       const items = state.items.map((item) => {
-        if (!refocusedId && item.kind === 'DecisionCard' && item.status === 'deferred') {
+        if (
+          !refocusedId &&
+          (item.kind === 'DecisionCard' || item.kind === 'FailureCard') &&
+          item.status === 'deferred'
+        ) {
           refocusedId = item.id;
           return { ...item, status: 'pending' as const };
         }

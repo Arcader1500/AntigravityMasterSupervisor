@@ -591,6 +591,53 @@ describe('Transcript', () => {
     expect(frame).not.toContain('needs you. Press End to jump to it.');
   });
 
+  it('slices visible items by estimated row height so maxRows is not exceeded', () => {
+    const makeCard = (n: number, title: string): TranscriptItem => ({
+      id: `del-${n}`,
+      kind: 'DelegationCard',
+      taskId: `task-${n}`,
+      taskNumber: n,
+      title,
+      role: 'implementer',
+      status: 'running',
+      nowSentence: `The implementer is working on ${title}, ${n}m in.`,
+      elapsedFormatted: `${n}m`,
+      timestamp: `2026-10-19T10:0${n}:00Z`,
+    });
+
+    const items: TranscriptItem[] = [
+      makeCard(1, 'Alpha module'),
+      makeCard(2, 'Beta module'),
+      makeCard(3, 'Gamma module'),
+      {
+        id: 'dec-1',
+        kind: 'DecisionCard',
+        promptKind: 'ask_question',
+        headline: 'Choose storage',
+        question: 'Which store?',
+        options: [
+          { index: 1, label: 'Redis' },
+          { index: 2, label: 'Postgres' },
+        ],
+        status: 'pending',
+        selectedOptionIndex: 1,
+        timestamp: '2026-10-19T10:05:00Z',
+      },
+    ];
+
+    const { lastFrame } = render(
+      <Transcript items={items} maxRows={10} maxWidth={88} theme={theme} glyphs={glyphs} />
+    );
+    const frame = lastFrame() ?? '';
+    const lines = frame.replace(/\n$/, '').split('\n');
+
+    expect(frame).toContain('Task 3: Gamma module');
+    expect(frame).toContain('Choose storage');
+    expect(frame).not.toContain('Task 1: Alpha module');
+    expect(frame).not.toContain('Task 2: Beta module');
+    expect(lines.length).toBeLessThanOrEqual(10);
+  });
+
   it('clamps scrollOffset to avoid viewport blanking when scrolling past the top', () => {
     const items: TranscriptItem[] = [
       { id: '1', kind: 'SupervisorNote', text: 'Note 1', timestamp: '2026-10-19T10:00:00Z' },
