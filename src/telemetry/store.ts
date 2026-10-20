@@ -4,7 +4,7 @@ import { VirtualTerminal } from '../pty/virtual-terminal.js';
 import { PtyRunner } from '../pty/runner.js';
 import { TelemetryParser } from './parser.js';
 import { pollWorkspaceOnce } from './poller.js';
-import { appendLedgerEvent, getLedgerPath } from '../core/ledger.js';
+import { appendLedgerEvent, getLedgerPath, loadLedger, updateLedger } from '../core/ledger.js';
 import type {
   ActivityFeedItem,
   TelemetryEvent,
@@ -19,7 +19,10 @@ export interface TelemetryStoreOptions {
   ptyRunner?: Pick<PtyRunner, 'getPid'>;
   pid?: number;
   pollIntervalMs?: number;
+  sessionStartedAt?: number;
 }
+
+const EXECUTION_SUBAGENT_ROLES = ['orchestrator', 'implementer', 'code-reviewer', 'verifier'];
 
 /**
  * TelemetryStore provides real-time state aggregation combining headless PTY output,
@@ -31,6 +34,7 @@ export class TelemetryStore {
   private parser: TelemetryParser;
   private ptyRunner?: Pick<PtyRunner, 'getPid'>;
   private explicitPid?: number;
+  private sessionStartedAt?: number;
   private startedAt: number;
   private phaseStartedAt: number;
   private lastPollSnapshot: WorkspacePollSnapshot;
@@ -39,6 +43,7 @@ export class TelemetryStore {
   private listeners: Set<() => void> = new Set();
   private pollTimer: NodeJS.Timeout | null = null;
   private unsubscribeLineCommit: (() => void) | null = null;
+  private unsubscribeTelemetryEvent: (() => void) | null = null;
 
   constructor(options: TelemetryStoreOptions);
   constructor(
@@ -75,6 +80,7 @@ export class TelemetryStore {
         projectDir: process.cwd(),
       };
       this.projectDir = path.resolve(opts.projectDir);
+      this.sessionStartedAt = opts.sessionStartedAt;
       this.virtualTerminal = opts.virtualTerminal ?? new VirtualTerminal();
       this.parser = opts.parser ?? new TelemetryParser();
       this.ptyRunner = opts.ptyRunner;
@@ -93,7 +99,9 @@ export class TelemetryStore {
     };
 
     // Initial poll to capture baseline workspace state without treating initial commit as new
-    this.lastPollSnapshot = pollWorkspaceOnce(this.projectDir);
+    this.lastPollSnapshot = pollWorkspaceOnce(this.projectDir, {
+      minMtimeMs: this.sessionStartedAt,
+    });
     if (this.lastPollSnapshot.lastCommit?.sha) {
       this.lastSeenCommitSha = this.lastPollSnapshot.lastCommit.sha;
     }
@@ -103,6 +111,36 @@ export class TelemetryStore {
       this.parser.processLine(line);
       this.notify();
     });
+
+    this.unsubscribeTelemetryEvent = this.parser.onEvent((event) => {
+      this.handleTelemetryEvent(event);
+    });
+  }
+
+  /**
+   * Advances the ledger to EXECUTING when an execution subagent is dispatched
+   * while the session is still in a planning phase.
+   */
+  private handleTelemetryEvent(event: TelemetryEvent): void {
+    if (event.type !== 'SUBAGENT_DISPATCHED') {
+      return;
+    }
+
+    if (!EXECUTION_SUBAGENT_ROLES.includes(event.role.toLowerCase())) {
+      return;
+    }
+
+    const ledgerPath = getLedgerPath(this.projectDir);
+    if (!fs.existsSync(ledgerPath)) {
+      return;
+    }
+
+    const { status } = loadLedger(this.projectDir);
+    if (status === 'IDLE' || status === 'PLANNING' || status === 'CHECKPOINT_SPEC') {
+      updateLedger(this.projectDir, (ledger) => {
+        ledger.status = 'EXECUTING';
+      });
+    }
   }
 
   /**
@@ -117,7 +155,9 @@ export class TelemetryStore {
    * updates cached artifacts and tasks, and notifies listeners.
    */
   public pollNow(): WorkspacePollSnapshot {
-    const currentPoll = pollWorkspaceOnce(this.projectDir);
+    const currentPoll = pollWorkspaceOnce(this.projectDir, {
+      minMtimeMs: this.sessionStartedAt,
+    });
     const currentSha = currentPoll.lastCommit?.sha;
 
     if (
@@ -187,6 +227,11 @@ export class TelemetryStore {
     if (this.unsubscribeLineCommit) {
       this.unsubscribeLineCommit();
       this.unsubscribeLineCommit = null;
+    }
+
+    if (this.unsubscribeTelemetryEvent) {
+      this.unsubscribeTelemetryEvent();
+      this.unsubscribeTelemetryEvent = null;
     }
   }
 

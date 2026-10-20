@@ -7,6 +7,7 @@ import type { PlanTaskItem, TaskChecklistItem, WorkspacePollSnapshot } from './t
 
 export interface PollWorkspaceOptions {
   syncLedger?: boolean;
+  minMtimeMs?: number;
 }
 
 /**
@@ -174,11 +175,13 @@ interface DiscoveredArtifact {
 
 /**
  * Searches candidate directories for the newest file matching a given regex.
+ * Files modified before `minMtimeMs` are ignored when it is provided.
  */
 function findLatestFile(
   projectDir: string,
   relativeDirs: string[],
-  filePattern: RegExp
+  filePattern: RegExp,
+  minMtimeMs?: number
 ): DiscoveredArtifact | null {
   let latest: DiscoveredArtifact | null = null;
 
@@ -203,17 +206,21 @@ function findLatestFile(
         const fullPath = path.join(dirPath, file);
         try {
           const fileStat = fs.statSync(fullPath);
-          if (fileStat.isFile()) {
-            if (!latest || fileStat.mtimeMs > latest.mtimeMs) {
-              const content = fs.readFileSync(fullPath, 'utf-8');
-              const relativePath = path.relative(projectDir, fullPath).replace(/\\/g, '/');
-              latest = {
-                relativePath,
-                fullPath,
-                content,
-                mtimeMs: fileStat.mtimeMs,
-              };
-            }
+          if (!fileStat.isFile()) {
+            continue;
+          }
+          if (minMtimeMs !== undefined && fileStat.mtimeMs < minMtimeMs) {
+            continue;
+          }
+          if (!latest || fileStat.mtimeMs > latest.mtimeMs) {
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            const relativePath = path.relative(projectDir, fullPath).replace(/\\/g, '/');
+            latest = {
+              relativePath,
+              fullPath,
+              content,
+              mtimeMs: fileStat.mtimeMs,
+            };
           }
         } catch {
           // Ignore unreadable files
@@ -238,13 +245,14 @@ export function pollWorkspaceOnce(
   const resolvedDir = path.resolve(projectDir);
 
   // 1. Git branch, dirty file count, and last commit
-  let branch = 'unknown';
+  const fallbackBranch = path.basename(resolvedDir) || 'workspace';
+  let branch = fallbackBranch;
   let dirtyFilesCount = 0;
   let lastCommit: { sha: string; subject: string } | undefined = undefined;
 
   const gitResult = checkGitRepo(resolvedDir);
   if (gitResult.isGit) {
-    branch = gitResult.branch || 'unknown';
+    branch = gitResult.branch || fallbackBranch;
 
     try {
       const statusRaw = execSync('git status --porcelain', {
@@ -292,7 +300,12 @@ export function pollWorkspaceOnce(
     path.join('docs', 'specs'),
   ];
   const specPattern = /(?:[-_]design|[-_]spec|^design|^spec)\.md$/i;
-  const specArtifact = findLatestFile(resolvedDir, specCandidateDirs, specPattern);
+  const specArtifact = findLatestFile(
+    resolvedDir,
+    specCandidateDirs,
+    specPattern,
+    options?.minMtimeMs
+  );
 
   // 3. Discover newest plan artifact
   const planCandidateDirs = [
@@ -301,7 +314,12 @@ export function pollWorkspaceOnce(
     'docs',
   ];
   const planPattern = /(?:[-_]plan|^plan)\.md$/i;
-  const planArtifact = findLatestFile(resolvedDir, planCandidateDirs, planPattern);
+  const planArtifact = findLatestFile(
+    resolvedDir,
+    planCandidateDirs,
+    planPattern,
+    options?.minMtimeMs
+  );
 
   const tasks = planArtifact ? parsePlanTasks(planArtifact.content) : [];
 
@@ -324,6 +342,12 @@ export function pollWorkspaceOnce(
           ledger.checkpoints.plan.path = planArtifact.relativePath;
           if (ledger.checkpoints.plan.status === 'UNINITIALIZED') {
             ledger.checkpoints.plan.status = 'PENDING';
+          }
+          if (
+            tasks.length > 0 &&
+            (ledger.status === 'PLANNING' || ledger.status === 'IDLE')
+          ) {
+            ledger.status = 'EXECUTING';
           }
         }
       });

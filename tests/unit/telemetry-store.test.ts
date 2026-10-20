@@ -6,7 +6,7 @@ import { execSync } from 'node:child_process';
 import { TelemetryStore } from '../../src/telemetry/store.js';
 import { VirtualTerminal } from '../../src/pty/virtual-terminal.js';
 import { TelemetryParser } from '../../src/telemetry/parser.js';
-import { initLedger, loadLedger } from '../../src/core/ledger.js';
+import { initLedger, loadLedger, updateLedger } from '../../src/core/ledger.js';
 
 describe('telemetry/store', () => {
   let tmpDir: string;
@@ -145,6 +145,63 @@ describe('telemetry/store', () => {
     const callCountAfterStop = pollSpy.mock.calls.length;
     await new Promise((res) => setTimeout(res, 120));
     expect(pollSpy.mock.calls.length).toBe(callCountAfterStop);
+  });
+
+  it('ignores plan files older than sessionStartedAt and picks up session-scoped plans', () => {
+    const plansDir = path.join(tmpDir, 'docs', 'superpowers', 'plans');
+    fs.mkdirSync(plansDir, { recursive: true });
+
+    const planFile = path.join(plansDir, '2026-10-17-prior-session-plan.md');
+    fs.writeFileSync(planFile, '### Task 1: Prior Session\n- [ ] Step 1\n');
+
+    const sessionStartedAt = Date.now() + 5000;
+    const oldDate = new Date(sessionStartedAt - 60_000);
+    fs.utimesSync(planFile, oldDate, oldDate);
+
+    const store = new TelemetryStore({
+      projectDir: tmpDir,
+      virtualTerminal: vt,
+      parser,
+      sessionStartedAt,
+    });
+
+    expect(store.getSnapshot().tasks).toEqual([]);
+    expect(store.getSnapshot().planPath).toBeNull();
+
+    // A plan created during the session is discovered on the next poll.
+    const freshDate = new Date(sessionStartedAt + 10_000);
+    fs.utimesSync(planFile, freshDate, freshDate);
+
+    const polled = store.pollNow();
+    expect(polled.planPath).toContain('2026-10-17-prior-session-plan.md');
+    expect(store.getSnapshot().tasks).toHaveLength(1);
+    expect(store.getSnapshot().tasks[0]).toMatchObject({
+      title: 'Task 1: Prior Session',
+      status: 'pending',
+    });
+
+    store.stop();
+  });
+
+  it('transitions the ledger to EXECUTING when an execution subagent is dispatched', () => {
+    initLedger(tmpDir);
+
+    for (const status of ['PLANNING', 'CHECKPOINT_SPEC'] as const) {
+      updateLedger(tmpDir, (ledger) => {
+        ledger.status = status;
+      });
+
+      const store = new TelemetryStore({
+        projectDir: tmpDir,
+        virtualTerminal: vt,
+        parser,
+      });
+
+      parser.processLine('invoke_subagent -> implementer');
+
+      expect(loadLedger(tmpDir).status).toBe('EXECUTING');
+      store.stop();
+    }
   });
 
   it('forwards structured telemetry events via onTelemetryEvent and exposes agentSteps and lastErrorLine in snapshot', async () => {

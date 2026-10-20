@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
 import { pollWorkspaceOnce, parsePlanTasks } from '../../src/telemetry/poller.js';
-import { loadLedger } from '../../src/core/ledger.js';
+import { initLedger, loadLedger } from '../../src/core/ledger.js';
 
 describe('telemetry/poller', () => {
   describe('parsePlanTasks', () => {
@@ -172,6 +172,54 @@ Just prose description without checkboxes.
       expect(ledger.checkpoints.spec.status).toBe('PENDING');
       expect(ledger.checkpoints.plan.path).toContain('2026-10-18-demo-plan.md');
       expect(ledger.checkpoints.plan.status).toBe('PENDING');
+    });
+
+    it('falls back to the folder name for the branch outside a git repository', () => {
+      const snapshot = pollWorkspaceOnce(tmpDir);
+      expect(snapshot.branch).toBe(path.basename(tmpDir));
+      expect(snapshot.branch).not.toBe('unknown');
+    });
+
+    it('ignores spec/plan artifacts older than minMtimeMs and discovers a session-scoped plan', () => {
+      const specsDir = path.join(tmpDir, 'docs', 'superpowers', 'specs');
+      const plansDir = path.join(tmpDir, 'docs', 'superpowers', 'plans');
+      fs.mkdirSync(specsDir, { recursive: true });
+      fs.mkdirSync(plansDir, { recursive: true });
+
+      initLedger(tmpDir);
+
+      const minMtimeMs = Date.now();
+      const oldDate = new Date(minMtimeMs - 60_000);
+
+      const oldSpec = path.join(specsDir, '2026-10-17-old-design.md');
+      fs.writeFileSync(oldSpec, '# Old Spec\nStale architecture.\n');
+      fs.utimesSync(oldSpec, oldDate, oldDate);
+
+      const oldPlan = path.join(plansDir, '2026-10-17-old-plan.md');
+      fs.writeFileSync(oldPlan, '### Task 1: Stale\n- [ ] Step 1\n');
+      fs.utimesSync(oldPlan, oldDate, oldDate);
+
+      const staleSnapshot = pollWorkspaceOnce(tmpDir, { minMtimeMs });
+      expect(staleSnapshot.specPath).toBeNull();
+      expect(staleSnapshot.specContent).toBeNull();
+      expect(staleSnapshot.planPath).toBeNull();
+      expect(staleSnapshot.planContent).toBeNull();
+      expect(staleSnapshot.tasks).toEqual([]);
+
+      const staleLedger = loadLedger(tmpDir);
+      expect(staleLedger.checkpoints.spec.path).toBeUndefined();
+      expect(staleLedger.checkpoints.plan.path).toBeUndefined();
+
+      const newPlan = path.join(plansDir, '2026-10-19-new-plan.md');
+      fs.writeFileSync(newPlan, '### Task 1: Fresh\n- [ ] Step 1\n### Task 2: Follow-up\n- [ ] Step 1\n');
+      const newDate = new Date(minMtimeMs + 1000);
+      fs.utimesSync(newPlan, newDate, newDate);
+
+      const freshSnapshot = pollWorkspaceOnce(tmpDir, { minMtimeMs });
+      expect(freshSnapshot.planPath).toContain('2026-10-19-new-plan.md');
+      expect(freshSnapshot.tasks).toHaveLength(2);
+      expect(freshSnapshot.tasks[0]).toMatchObject({ title: 'Task 1: Fresh', status: 'pending' });
+      expect(freshSnapshot.tasks[1]).toMatchObject({ title: 'Task 2: Follow-up', status: 'pending' });
     });
 
     it('selects newest spec and plan when multiple exist', async () => {
