@@ -51,3 +51,20 @@ export interface SpawnConfig {
     useConpty?: boolean;
   };
 }
+
+/**
+ * Configuration options for VirtualTerminal buffer.
+ */
+export interface VirtualTerminalOptions {
+  cols?: number;
+  rows?: number;
+  scrollback?: number;
+}
+
+/**
+ * Handle returned by attachRawPassthrough to restore standard I/O settings.
+ */
+export interface RawPassthroughHandle {
+  detach: () => void;
+}
+

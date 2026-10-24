@@ -2,6 +2,10 @@ import { Command } from 'commander';
 import { doctorCommand, type DoctorOptions } from './commands/doctor.js';
 import { runCommand, type RunOptions } from './commands/run.js';
 
+interface CliRunOptions extends RunOptions {
+  tui?: boolean;
+}
+
 /**
  * Creates and configures the Commander CLI program for agy-supervisor.
  */
@@ -14,7 +18,10 @@ export function createCliProgram(): Command {
     .version('0.1.0')
     .enablePositionalOptions()
     .option('--agy-bin <path>', 'Explicit path to Antigravity (agy) binary')
+    .option('--agent <name>', 'Agent role name to run')
+    .option('--no-tui', 'Run in raw interactive terminal passthrough mode without the TUI')
     .option('--dry-run', 'Simulate execution in dry-run mode')
+    .option('--resume', 'Resume previous supervisor session state and plan')
     .option('-v, --verbose', 'Enable verbose logging');
 
   program
@@ -38,15 +45,22 @@ export function createCliProgram(): Command {
     .description('Run supervisor orchestrating Antigravity agent execution')
     .option('--agy-bin <path>', 'Explicit path to Antigravity (agy) binary')
     .option('--agent <name>', 'Agent role name to run')
+    .option('--no-tui', 'Run in raw interactive terminal passthrough mode without the TUI')
     .option('--dry-run', 'Simulate execution in dry-run mode')
+    .option('--resume', 'Resume previous supervisor session state and plan')
     .option('-v, --verbose', 'Enable verbose logging')
-    .action(async (targetDir?: string, cmdOptions?: Partial<RunOptions>) => {
-      const globalOpts = program.opts<RunOptions>();
+    .action(async (targetDir?: string, cmdOptions?: Partial<CliRunOptions>) => {
+      const globalOpts = program.opts<CliRunOptions>();
       const mergedOpts: RunOptions = {
         agyBin: cmdOptions?.agyBin ?? globalOpts.agyBin,
         agent: cmdOptions?.agent ?? globalOpts.agent,
         dryRun: Boolean(cmdOptions?.dryRun || globalOpts.dryRun),
         verbose: Boolean(cmdOptions?.verbose || globalOpts.verbose),
+        resume: Boolean(cmdOptions?.resume || globalOpts.resume),
+        noTui:
+          cmdOptions?.tui === false ||
+          globalOpts.tui === false ||
+          Boolean(cmdOptions?.noTui || globalOpts.noTui),
       };
       await runCommand(targetDir, mergedOpts);
     });
