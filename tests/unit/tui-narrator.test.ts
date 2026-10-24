@@ -23,10 +23,10 @@ describe('narrator copy templates', () => {
       'What do you want built? Describe it in your own words. I will ask you only about decisions the repo cannot answer.'
     );
     expect(CONTEXT_RESET_NOTE).toBe(
-      'The plan is approved. I started a fresh orchestrator so it has the full context window. The planning conversation is not carried over.'
+      'Ledger phase changed to EXECUTING; a fresh orchestrator handoff and conversation reset are unconfirmed.'
     );
     expect(COMPLETION_NEXT_STEPS_NOTE).toBe(
-      'Review the branch, then merge when you are ready.'
+      'Review and verification are unconfirmed.'
     );
     expect(HELP_TEXT_NOTE).toContain('Keyboard shortcuts');
     expect(HELP_TEXT_NOTE).toContain('/spec');
@@ -85,14 +85,15 @@ describe('narrator copy templates', () => {
 
   it('formats test summary sentence', () => {
     expect(formatTestSummarySentence('implementer', 14, 0)).toBe(
-      '14 of 14 tests pass so far.'
+      '14 of 14 tests pass so far, as reported by agent output.'
     );
     expect(formatTestSummarySentence('implementer', 12, 2)).toBe(
-      '2 tests failing, the implementer is fixing them.'
+      '2 tests reported failing by agent output; repair status is unconfirmed.'
     );
     expect(formatTestSummarySentence('implementer', 13, 1)).toBe(
-      '1 test failing, the implementer is fixing them.'
+      '1 test reported failing by agent output; repair status is unconfirmed.'
     );
+    expect(formatTestSummarySentence('implementer', 13, 0, 'artifacts')).toContain('reported by artifacts');
   });
 
   it('formats blocked fallback reason when no error line was parsed', () => {
@@ -103,10 +104,10 @@ describe('narrator copy templates', () => {
 
   it('formats phase change notes', () => {
     expect(formatPhaseChangeNote('CHECKPOINT_SPEC', 'PLANNING')).toBe(
-      'Spec approved. Planning the tasks.'
+      'Ledger phase is PLANNING.'
     );
     expect(formatPhaseChangeNote('PLANNING', 'EXECUTING', undefined, 5, 3)).toBe(
-      'Plan approved. Executing 5 tasks across 3 waves.'
+      'Ledger phase is EXECUTING; 5 tasks across 3 waves are recorded.'
     );
   });
 });
@@ -277,7 +278,7 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     });
     expect(state.items).toHaveLength(countBefore);
     card = state.items.find((i) => i.kind === 'DelegationCard') as Extract<TranscriptItem, { kind: 'DelegationCard' }>;
-    expect(card.testSummaryText).toBe('14 of 14 tests pass so far.');
+    expect(card.testSummaryText).toBe('14 of 14 tests pass so far, as reported by agent output.');
   });
 
   it('SUBAGENT_COMPLETED with DONE collapses DelegationCard', () => {
@@ -312,6 +313,21 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     const card = state.items.find((i) => i.kind === 'DelegationCard') as Extract<TranscriptItem, { kind: 'DelegationCard' }>;
     expect(card.status).toBe('completed');
     expect(card.elapsedFormatted).toBe('1m 12s');
+    expect(card.reportedVerdict).toBe('DONE');
+    expect(card.reportSource).toBe('agent_output');
+    expect(card.nextStepText).toContain('review and verification are unconfirmed');
+  });
+
+  it('keeps critic APPROVE and READY reports separate from human approval and execution handoff', () => {
+    let state = createInitialNarratorState();
+    state = reduceNarrator(state, { type: 'TELEMETRY_EVENT', event: { type: 'SUBAGENT_DISPATCHED', role: 'plan-critic', rawLine: 'critic', timestamp: 'now' }, elapsedFormatted: '0s' });
+    state = reduceNarrator(state, { type: 'TELEMETRY_EVENT', event: { type: 'SUBAGENT_COMPLETED', role: 'plan-critic', verdict: 'APPROVE', source: 'agent_output', elapsedMs: 1, timestamp: 'later' }, elapsedFormatted: '0s' });
+    const card = state.items.find((item) => item.kind === 'DelegationCard');
+    expect(card?.kind === 'DelegationCard' && card.reportedVerdict).toBe('APPROVE');
+    expect(card?.kind === 'DelegationCard' && card.nextStepText).toMatch(/Spec approval and execution handoff are unconfirmed/);
+
+    state = reduceNarrator(state, { type: 'TELEMETRY_EVENT', event: { type: 'SUBAGENT_COMPLETED', role: 'verifier', verdict: 'READY', source: 'artifacts', elapsedMs: 1, timestamp: 'ready' }, elapsedFormatted: '0s' });
+    expect(state.items.some((item) => item.kind === 'SupervisorNote' && item.text.includes('verifier reported READY from artifacts'))).toBe(true);
   });
 
   it('SUBAGENT_COMPLETED with DONE_WITH_CONCERNS collapses with status and note', () => {
@@ -345,7 +361,7 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
 
     const card = state.items.find((i) => i.kind === 'DelegationCard') as Extract<TranscriptItem, { kind: 'DelegationCard' }>;
     expect(card.status).toBe('completed_with_concerns');
-    expect(card.nextStepText).toBe('Finished with concerns. Reviewer will check.');
+    expect(card.nextStepText).toContain('review and verification are unconfirmed');
   });
 
   it('SUBAGENT_COMPLETED with BLOCKED converts card into FailureCard quoting lastErrorLine', () => {
@@ -453,7 +469,7 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     expect(commitLine.message).toBe('Task 2 committed: token bucket');
   });
 
-  it('LEDGER_STATUS_CHANGED appends PhaseChange, emits context reset when starting execution, and appends CompletionCard when done', () => {
+  it('legacy COMPLETED remains a recorded phase and does not synthesize verification or task completion', () => {
     let state = createInitialNarratorState();
     state = reduceNarrator(state, {
       type: 'TASKS_UPDATED',
@@ -478,7 +494,7 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     const resetNote = state.items.find(
       (i) => i.kind === 'SupervisorNote' && i.text === CONTEXT_RESET_NOTE
     );
-    expect(resetNote).toBeDefined();
+    expect(resetNote?.kind === 'SupervisorNote' && resetNote.text).toMatch(/handoff.*unconfirmed/i);
 
     // Add a commit line to check commitCount on completion
     state = reduceNarrator(state, {
@@ -498,13 +514,10 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
       timestamp: '2026-10-19T10:20:00.000Z',
     });
 
-    const completion = state.items.find((i) => i.kind === 'CompletionCard') as Extract<TranscriptItem, { kind: 'CompletionCard' }>;
-    expect(completion).toBeDefined();
-    expect(completion.branchName).toBe('feature/rate-limiter');
-    expect(completion.taskCount).toBe(2);
-    expect(completion.commitCount).toBe(1);
-    expect(completion.totalElapsedFormatted).toBe('12m 45s');
-    expect(completion.verifierResult).toBeDefined();
+    expect(state.items.some((i) => i.kind === 'CompletionCard')).toBe(false);
+    const completedPhase = state.items.find((i) => i.kind === 'PhaseChange' && i.phase === 'COMPLETED');
+    expect(completedPhase?.kind === 'PhaseChange' && completedPhase.text).toMatch(/legacy.*COMPLETED.*unconfirmed/i);
+    expect(state.items.map((item) => item.kind === 'SupervisorNote' ? item.text : '').join(' ')).not.toMatch(/All checks passed/i);
   });
 
   it('LEDGER_STATUS_CHANGED from IDLE to PLANNING at startup updates ledgerStatus without a PhaseChange item', () => {
@@ -568,6 +581,7 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     expect(decision).toBeDefined();
     expect(decision.status).toBe('pending');
     expect(decision.selectedOptionIndex).toBe(1);
+    expect(decision.revision).toBe(0);
     expect(decision.options).toHaveLength(2);
 
     // Streaming update for same question does not double count
@@ -591,6 +605,7 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     expect(state.pendingDecisionCount).toBe(1);
     const updated = state.items.find((i) => i.kind === 'DecisionCard') as Extract<TranscriptItem, { kind: 'DecisionCard' }>;
     expect(updated.options).toHaveLength(3);
+    expect(updated.revision).toBe(1);
 
     // Answer decision
     state = reduceNarrator(state, {
@@ -608,10 +623,9 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
   it('DECISION_ANSWERED on FailureCard resolves card and decrements pending count', () => {
     let state = createInitialNarratorState();
     state = reduceNarrator(state, {
-      type: 'PTY_EXITED',
-      exitCode: 1,
-      lastErrorLine: 'fatal error',
-      timestamp: '2026-10-19T10:15:00.000Z',
+      type: 'TELEMETRY_EVENT',
+      event: { type: 'SUBAGENT_COMPLETED', role: 'implementer', verdict: 'BLOCKED', reason: 'fatal error', elapsedMs: 0, timestamp: '2026-10-19T10:15:00.000Z' },
+      elapsedFormatted: '0s',
     });
 
     expect(state.pendingDecisionCount).toBe(1);
@@ -628,6 +642,24 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     const resolved = state.items.find((i) => i.id === failure.id) as Extract<TranscriptItem, { kind: 'FailureCard' }>;
     expect(resolved.status).toBe('resolved');
     expect(resolved.resolvedText).toBe('Retry the task');
+  });
+
+  it('tracks local delivery and appends one factual process outcome note without a completion card', () => {
+    let state = createInitialNarratorState();
+    state = reduceNarrator(state, {
+      type: 'TELEMETRY_EVENT',
+      event: {
+        type: 'DECISION_PROMPT', promptKind: 'ask_question', headline: 'Question', question: 'Choose?',
+        options: [{ index: 1, label: 'Yes' }], timestamp: '2026-10-24T00:00:00Z',
+      },
+      elapsedFormatted: '0s',
+    });
+    const decision = state.items.find((item) => item.kind === 'DecisionCard')!;
+    state = reduceNarrator(state, { type: 'DECISION_DELIVERY_UPDATED', id: decision.id, delivery: 'queued' });
+    expect(state.items.find((item) => item.id === decision.id)?.kind === 'DecisionCard' && (state.items.find((item) => item.id === decision.id) as any).delivery).toBe('queued');
+    state = reduceNarrator(state, { type: 'PROCESS_OUTCOME', outcome: { runId: 'run-1', sessionId: 'session-1', kind: 'exit', exitCode: 7, observedAt: '2026-10-24T00:00:01Z' } });
+    expect(state.items.filter((item) => item.kind === 'SupervisorNote' && item.text === 'Agent process exited with code 7')).toHaveLength(1);
+    expect(state.items.some((item) => item.kind === 'CompletionCard')).toBe(false);
   });
 
   it('QUIET_COUNT_UPDATED maintains single QuietCounter immediately above active card and omits at 0', () => {
@@ -670,7 +702,7 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
     expect(state.items.some((i) => i.kind === 'QuietCounter')).toBe(false);
   });
 
-  it('PTY_EXITED with non-zero exit code appends FailureCard with takeover/retry/quit options', () => {
+  it('PTY_EXITED with non-zero exit code reports the observed outcome without inventing a retry decision', () => {
     let state = createInitialNarratorState();
 
     state = reduceNarrator(state, {
@@ -680,16 +712,9 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
       timestamp: '2026-10-19T10:12:00.000Z',
     });
 
-    expect(state.pendingDecisionCount).toBe(1);
-    const failure = state.items.find((i) => i.kind === 'FailureCard') as Extract<TranscriptItem, { kind: 'FailureCard' }>;
-    expect(failure).toBeDefined();
-    expect(failure.failureKind).toBe('pty_exit');
-    expect(failure.reason).toContain('Killed by OOM');
-    expect(failure.options).toEqual([
-      { index: 1, label: 'Retry the task', action: 'retry' },
-      { index: 2, label: 'Take over the terminal', action: 'takeover' },
-      { index: 3, label: 'Quit', action: 'quit' },
-    ]);
+    expect(state.pendingDecisionCount).toBe(0);
+    expect(state.items.some((i) => i.kind === 'FailureCard')).toBe(false);
+    expect(state.items.some((i) => i.kind === 'SupervisorNote' && i.text.includes('code 137') && i.text.includes('Killed by OOM'))).toBe(true);
   });
 
   it('supports DECISION_SELECTION_CHANGED, DECISION_DEFERRED, and DECISION_REFOCUSED', () => {
@@ -741,10 +766,9 @@ describe('narrator reducer - Section 5 event-to-item mapping', () => {
   it('DECISION_DEFERRED and DECISION_REFOCUSED work on a FailureCard', () => {
     let state = createInitialNarratorState();
     state = reduceNarrator(state, {
-      type: 'PTY_EXITED',
-      exitCode: 1,
-      lastErrorLine: 'fatal error',
-      timestamp: '2026-10-19T10:15:00.000Z',
+      type: 'TELEMETRY_EVENT',
+      event: { type: 'SUBAGENT_COMPLETED', role: 'implementer', verdict: 'BLOCKED', reason: 'fatal error', elapsedMs: 0, timestamp: '2026-10-19T10:15:00.000Z' },
+      elapsedFormatted: '0s',
     });
 
     const failure = state.items.find(

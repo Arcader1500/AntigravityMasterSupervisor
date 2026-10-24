@@ -102,9 +102,11 @@ export function formatAgentStep(
 
     let outcome: string;
     if (step.testSummary) {
-      outcome = `${step.testSummary.passed} passed, ${step.testSummary.failed} failed`;
-    } else if (step.exitCode === 0 || step.exitCode === undefined) {
-      outcome = 'ok';
+      outcome = `${step.testSummary.passed} passed, ${step.testSummary.failed} failed (summary reported by ${step.agent})`;
+    } else if (step.exitCode === undefined) {
+      outcome = 'outcome unknown';
+    } else if (step.exitCode === 0) {
+      outcome = 'exit code 0';
     } else {
       outcome = `failed (exit ${step.exitCode})`;
     }
@@ -160,9 +162,8 @@ export const ZoomView: React.FC<ZoomViewProps> = ({
 
   const stepCountWord = toCapitalizedWord(steps.length);
   const stepNoun = steps.length === 1 ? 'step' : 'steps';
-  const failedCount = steps.filter((s) => s.status === 'failed').length;
-  const failedPart =
-    failedCount === 0 ? 'nothing failed' : `${failedCount} failed`;
+  const failedCount = steps.filter((s) => s.status === 'failed' || s.status === 'failed_recovered').length;
+  const failedPart = failedCount === 0 ? 'no failures reported' : `${failedCount} failure${failedCount === 1 ? '' : 's'} reported`;
 
   const headerTitle = taskTitle ?? (taskNumber ? `Task ${taskNumber}` : role);
 

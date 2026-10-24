@@ -4,9 +4,12 @@ import { attachRawPassthrough } from '../../src/pty/raw-passthrough.js';
 
 class MockStdin extends EventEmitter {
   isTTY = true;
-  setRawMode = vi.fn();
-  resume = vi.fn();
-  pause = vi.fn();
+  isRaw = false;
+  paused = true;
+  setRawMode = vi.fn((value: boolean) => { this.isRaw = value; });
+  resume = vi.fn(() => { this.paused = false; });
+  pause = vi.fn(() => { this.paused = true; });
+  isPaused = vi.fn(() => this.paused);
 }
 
 class MockStdout extends EventEmitter {
@@ -97,5 +100,20 @@ describe('attachRawPassthrough', () => {
 
     handle.detach();
     expect(stdin.setRawMode).toHaveBeenCalledTimes(2); // no extra setRawMode calls
+  });
+
+  it('restores original raw and input-flow state when they were already active', () => {
+    const mockPty = { write: vi.fn(), resize: vi.fn() };
+    const stdin = new MockStdin();
+    const stdout = new MockStdout();
+    stdin.isRaw = true;
+    stdin.paused = false;
+
+    const handle = attachRawPassthrough(mockPty, stdin as unknown as NodeJS.ReadStream, stdout as unknown as NodeJS.WriteStream);
+    handle.detach();
+
+    expect(stdin.isRaw).toBe(true);
+    expect(stdin.paused).toBe(false);
+    expect(stdin.resume).toHaveBeenCalledTimes(2);
   });
 });

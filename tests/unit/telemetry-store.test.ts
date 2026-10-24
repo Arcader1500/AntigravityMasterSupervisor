@@ -7,6 +7,7 @@ import { TelemetryStore } from '../../src/telemetry/store.js';
 import { VirtualTerminal } from '../../src/pty/virtual-terminal.js';
 import { TelemetryParser } from '../../src/telemetry/parser.js';
 import { initLedger, loadLedger, updateLedger } from '../../src/core/ledger.js';
+import { createProcessRunContext, recordProcessOutcome } from '../../src/core/process-outcome.js';
 
 describe('telemetry/store', () => {
   let tmpDir: string;
@@ -200,8 +201,65 @@ describe('telemetry/store', () => {
       parser.processLine('invoke_subagent -> implementer');
 
       expect(loadLedger(tmpDir).status).toBe('EXECUTING');
+      expect(store.getSnapshot().phaseSource).toBe('agent_output');
       store.stop();
     }
+  });
+
+  it('attributes task-driven phase promotion to discovered artifacts', () => {
+    initLedger(tmpDir);
+    const plansDir = path.join(tmpDir, 'docs', 'superpowers', 'plans');
+    fs.mkdirSync(plansDir, { recursive: true });
+    fs.writeFileSync(path.join(plansDir, '2026-10-24-progress-plan.md'), '### Task 1: Observed progress\n- [x] Checkbox source is the plan\n');
+
+    const store = new TelemetryStore({ projectDir: tmpDir, virtualTerminal: vt, parser });
+    expect(store.getSnapshot().phaseSource).toBe('artifacts');
+    store.stop();
+  });
+
+  it('keeps ended telemetry fenced while retaining discovered artifacts and ledger outcome provenance', () => {
+    const initialLedger = initLedger(tmpDir);
+    const plansDir = path.join(tmpDir, 'docs', 'superpowers', 'plans');
+    fs.mkdirSync(plansDir, { recursive: true });
+    fs.writeFileSync(path.join(plansDir, '2026-10-24-fence-plan.md'), '### Task 1: Keep visible\n- [x] Observed only\n');
+
+    const processRun = createProcessRunContext(initialLedger.sessionId);
+    const outcome = {
+      ...processRun,
+      observedAt: new Date().toISOString(),
+      kind: 'exit' as const,
+      exitCode: 0,
+    };
+    recordProcessOutcome(tmpDir, outcome);
+
+    const store = new TelemetryStore({ projectDir: tmpDir, virtualTerminal: vt, parser, processRun });
+    store.handleProcessOutcome(outcome);
+    parser.processLine('invoke_subagent -> implementer');
+    store.pollNow();
+    const snapshot = store.getSnapshot();
+
+    expect(loadLedger(tmpDir).status).toBe('IDLE');
+    expect(snapshot.planPath).toContain('2026-10-24-fence-plan.md');
+    expect(snapshot.tasks[0]).toMatchObject({ status: 'completed' });
+    expect(snapshot.processOutcome).toEqual(outcome);
+    expect(snapshot.processOutcomeSource).toBe('ledger');
+    expect(snapshot.phaseSource).toBe('ledger');
+    store.stop();
+  });
+
+  it('keeps READY as reported agent output without approving a checkpoint', () => {
+    initLedger(tmpDir);
+    const store = new TelemetryStore({ projectDir: tmpDir, virtualTerminal: vt, parser });
+    const received: any[] = [];
+    store.onTelemetryEvent((event) => received.push(event));
+
+    parser.processLine('invoke_subagent -> plan-critic');
+    parser.processLine('Status: READY - plan is ready for review');
+
+    expect(received.at(-1)).toMatchObject({ type: 'SUBAGENT_COMPLETED', verdict: 'READY', source: 'agent_output' });
+    expect(loadLedger(tmpDir).checkpoints.spec.status).not.toBe('APPROVED');
+    expect(loadLedger(tmpDir).checkpoints.plan.status).not.toBe('APPROVED');
+    store.stop();
   });
 
   it('forwards structured telemetry events via onTelemetryEvent and exposes agentSteps and lastErrorLine in snapshot', async () => {
@@ -222,6 +280,7 @@ describe('telemetry/store', () => {
     expect(receivedEvents.some((e) => e.type === 'SUBAGENT_DISPATCHED')).toBe(true);
     expect(receivedEvents.some((e) => e.type === 'TOOL_CALLED')).toBe(true);
     expect(receivedEvents.some((e) => e.type === 'ERROR_LINE')).toBe(true);
+    expect(receivedEvents.every((e) => e.source === 'agent_output')).toBe(true);
 
     const snapshot = store.getSnapshot();
     expect(snapshot.lastErrorLine).toContain('ECONNREFUSED');

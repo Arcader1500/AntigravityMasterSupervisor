@@ -95,6 +95,8 @@ describe('TelemetryParser (Pure Passive Regex)', () => {
 
     it('detects various status verdicts (DONE_WITH_CONCERNS, BLOCKED, NEEDS_CONTEXT, READY)', () => {
       const parser = new TelemetryParser({ mainAgent: 'orchestrator' });
+      const events: any[] = [];
+      parser.onEvent((event) => events.push(event));
 
       parser.processLine('invoke_subagent -> implementer');
       parser.processLine('Status: DONE_WITH_CONCERNS - Minor lint issue noted');
@@ -103,6 +105,14 @@ describe('TelemetryParser (Pure Passive Regex)', () => {
       parser.processLine('invoke_subagent -> researcher');
       parser.processLine('Verdict: BLOCKED - missing permissions');
       expect(parser.getState().activeSubagent).toBeNull();
+
+      parser.processLine('invoke_subagent -> plan-critic');
+      parser.processLine('Status: READY - plan is ready for handoff');
+      expect(events.at(-1)).toMatchObject({
+        type: 'SUBAGENT_COMPLETED',
+        verdict: 'READY',
+        source: 'agent_output',
+      });
     });
   });
 

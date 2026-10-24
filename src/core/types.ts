@@ -9,6 +9,22 @@ export type LedgerStatus =
 
 export type CheckpointStatus = 'UNINITIALIZED' | 'PENDING' | 'APPROVED' | 'REJECTED';
 
+export type ProcessOutcome = {
+  runId: string;
+  sessionId: string;
+  observedAt: string;
+} & (
+  | { kind: 'exit'; exitCode?: number; signal?: number }
+  | { kind: 'interrupted'; supervisorSignal?: string; supervisorExitCode?: number }
+  | { kind: 'startup_error'; message: string }
+);
+
+export interface ProcessRunContext {
+  runId: string;
+  sessionId: string;
+  outcome?: ProcessOutcome;
+}
+
 export interface CheckpointInfo {
   status: CheckpointStatus;
   path?: string;

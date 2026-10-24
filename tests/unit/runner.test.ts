@@ -65,6 +65,31 @@ describe('PtyRunner', () => {
     expect(exitListener).toHaveBeenCalledWith(0, undefined);
   });
 
+  it('releases subscriptions and invokes the exit callback before start resolves', async () => {
+    const runner = new PtyRunner({ projectDir: process.cwd(), binaryPath: 'agy', agent: 'planner', dryRun: true });
+    const events: string[] = [];
+    const dataListener = vi.fn();
+    const unsubscribeData = runner.onData(dataListener);
+    unsubscribeData();
+    const unsubscribeExit = runner.onExit(() => events.push('exit'));
+    const start = runner.start().then(() => events.push('resolved'));
+
+    await start;
+    expect(dataListener).not.toHaveBeenCalled();
+    expect(events).toEqual(['exit', 'resolved']);
+    unsubscribeExit();
+    expect(() => (runner as any).emitExit(9, 15)).not.toThrow();
+    expect(events).toEqual(['exit', 'resolved']);
+  });
+
+  it('forwards both numeric exit code and signal metadata', () => {
+    const runner = new PtyRunner({ projectDir: process.cwd(), binaryPath: 'agy', agent: 'planner', dryRun: true });
+    const listener = vi.fn();
+    runner.onExit(listener);
+    (runner as any).emitExit(7, 15);
+    expect(listener).toHaveBeenCalledWith(7, 15);
+  });
+
   it('safely handles write, resize, and kill in dry-run mode', async () => {
     const runner = new PtyRunner({
       projectDir: process.cwd(),

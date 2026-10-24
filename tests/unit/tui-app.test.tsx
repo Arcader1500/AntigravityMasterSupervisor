@@ -163,7 +163,7 @@ describe('TUI App Mode Router & Responsive Layout', () => {
 
       expect(onWritePty).toHaveBeenCalledWith('\x1b[B\r');
       await new Promise((r) => setTimeout(r, 50));
-      expect(lastFrame()).toContain('You chose: Leaky bucket');
+      expect(lastFrame()).toContain('Input sent: Leaky bucket.');
       expect(lastFrame()).not.toContain('1 needs you');
     });
 
@@ -208,7 +208,7 @@ describe('TUI App Mode Router & Responsive Layout', () => {
       // Submitting on empty sends option 1
       stdin.write('\r');
       expect(onWritePty).toHaveBeenCalledWith('\r');
-      expect(lastFrame()).toContain('You chose: Token bucket');
+      expect(lastFrame()).toContain('Input sent: Token bucket.');
     });
 
     it('pressing Esc defers decision and End re-focuses it', () => {
@@ -381,6 +381,84 @@ describe('TUI App Mode Router & Responsive Layout', () => {
       expect(lastFrame()).toContain('1 needs you');
     });
 
+    it('routes takeover transition and re-entry suffix bytes to the PTY exactly once', () => {
+      const onWritePty = vi.fn();
+      const { stdin } = render(
+        <App snapshot={sampleSnapshot} ledger={sampleLedger} onWritePty={onWritePty}
+          onRequestQuit={vi.fn()} dimensions={{ columns: 100, rows: 32 }} />
+      );
+
+      stdin.write('\x14abc\x0b');
+      expect(onWritePty).toHaveBeenNthCalledWith(1, 'abc\x0b');
+      stdin.write('\x1d');
+      stdin.write('/raw\rdef\x0b');
+      expect(onWritePty).toHaveBeenNthCalledWith(2, 'def\x0b');
+      stdin.write('\x1d');
+      stdin.write('\x14ghi');
+      expect(onWritePty).toHaveBeenNthCalledWith(3, 'ghi');
+      expect(onWritePty).toHaveBeenCalledTimes(3);
+    });
+
+    it('keeps split CRLF ownership when the first submit changes focused card', () => {
+      const onWritePty = vi.fn();
+      const store = decisionStore(onWritePty, vi.fn());
+      store.dispatch({
+        type: 'TELEMETRY_EVENT',
+        event: {
+          type: 'DECISION_PROMPT', promptKind: 'ask_question',
+          headline: 'Second decision', question: 'Second question?',
+          options: [{ index: 1, label: 'Yes' }, { index: 2, label: 'No' }],
+          timestamp: new Date().toISOString(),
+        },
+        elapsedFormatted: '0s',
+      });
+      const { stdin, lastFrame } = render(
+        <App snapshot={sampleSnapshot} ledger={sampleLedger} transcriptStore={store}
+          onWritePty={onWritePty} onRequestQuit={vi.fn()} dimensions={{ columns: 100, rows: 32 }} />
+      );
+
+      stdin.write('\r');
+      const afterFirstEnter = onWritePty.mock.calls.length;
+      stdin.write('\n');
+      expect(onWritePty).toHaveBeenCalledTimes(afterFirstEnter);
+      expect(lastFrame()).toContain('Second decision');
+      expect(lastFrame()).toContain('1 needs you');
+    });
+
+    it('keeps the visible logical marker on its row after append and width reflow', async () => {
+      const store = createMockTranscriptStore(vi.fn(), vi.fn());
+      const longTail = 'x'.repeat(56);
+      for (let index = 0; index < 45; index++) {
+        const id = `marker-${String(index).padStart(2, '0')}`;
+        store.submitUserMessage(`${id} ${longTail}`);
+      }
+      const { stdin, lastFrame, rerender } = render(
+        <App snapshot={sampleSnapshot} ledger={sampleLedger} transcriptStore={store}
+          onWritePty={vi.fn()} onRequestQuit={vi.fn()} dimensions={{ columns: 100, rows: 32 }} />
+      );
+      stdin.write('\x1b[5~');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const markerRow = () => {
+        const lines = (lastFrame() ?? '').split('\n');
+        const line = lines.find((entry) => /marker-\d{2}/.test(entry));
+        const rule = lines.findIndex((entry) => /^─+$/.test(entry));
+        return line ? { marker: line.match(/marker-\d{2}/)?.[0], row: lines.indexOf(line) - rule - 1 } : undefined;
+      };
+      const before = markerRow();
+      expect(before).toBeDefined();
+
+      store.submitUserMessage(`new-append ${longTail}`);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(markerRow()).toEqual(before);
+
+      rerender(
+        <App snapshot={sampleSnapshot} ledger={sampleLedger} transcriptStore={store}
+          onWritePty={vi.fn()} onRequestQuit={vi.fn()} dimensions={{ columns: 60, rows: 18 }} />
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(markerRow()).toEqual(before);
+    });
+
     it('ignores digit selections beyond the decision option count and shows the real count', async () => {
       const onWritePty = vi.fn();
       const store = decisionStore(onWritePty, vi.fn());
@@ -404,7 +482,7 @@ describe('TUI App Mode Router & Responsive Layout', () => {
 
       expect(onWritePty).toHaveBeenCalledWith('\r');
       await new Promise((r) => setTimeout(r, 50));
-      expect(lastFrame()).toContain('You chose: Token bucket');
+      expect(lastFrame()).toContain('Input sent: Token bucket.');
       expect(lastFrame()).not.toContain('Option 5');
     });
 
@@ -685,7 +763,7 @@ describe('TUI App Mode Router & Responsive Layout', () => {
       expect(lastFrame()).toMatch(/Team \/ (implementer|orchestrator)/);
     });
 
-    it('below 80x24 renders minimum window size guard', () => {
+    it('keeps a 30x8 layout bounded and recovers interaction after grow', () => {
       const onWritePty = vi.fn();
       const onRequestQuit = vi.fn();
 
@@ -695,17 +773,97 @@ describe('TUI App Mode Router & Responsive Layout', () => {
           ledger={sampleLedger}
           onWritePty={onWritePty}
           onRequestQuit={onRequestQuit}
-          dimensions={{ columns: 70, rows: 20 }}
+          dimensions={{ columns: 30, rows: 8 }}
         />
       );
 
-      expect(lastFrame()).toContain(
-        'Make this window at least 80 columns by 24 rows.'
+      expect(lastFrame()).not.toContain('Make this window at least');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(8);
+      expect(lastFrame()).toContain('Message the supervisor');
+    });
+
+    it('keeps spec, audit, and narrow team rows consecutive at 60x18', () => {
+      const specSnapshot = {
+        ...sampleSnapshot,
+        specContent: Array.from({ length: 24 }, (_, index) => `visible-spec-${index + 1}`).join('\n'),
+      };
+      const { stdin: specStdin, lastFrame: specFrame } = render(
+        <App snapshot={specSnapshot} ledger={sampleLedger} onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()} dimensions={{ columns: 60, rows: 18 }} />
       );
+      specStdin.write('/spec\r');
+      const docNumbers = (specFrame() ?? '').split('\n')
+        .map((line) => Number(line.match(/(?:^|│)\s*(\d+) │ visible-spec-/)?.[1]))
+        .filter(Number.isFinite);
+      expect(docNumbers.length).toBeGreaterThan(0);
+      expect(docNumbers.slice(1).every((number, index) => number === docNumbers[index] + 1)).toBe(true);
+
+      const { stdin: auditStdin, lastFrame: auditFrame } = render(
+        <App snapshot={sampleSnapshot} ledger={sampleLedger} onWritePty={vi.fn()}
+          onRequestQuit={vi.fn()} dimensions={{ columns: 60, rows: 18 }} />
+      );
+      auditStdin.write('/audit\r');
+      const auditEvents = (auditFrame() ?? '').split('\n')
+        .map((line) => line.match(/(?:First event|Second event|Third event)/)?.[0])
+        .filter((event): event is string => event !== undefined);
+      expect(auditEvents.length).toBeGreaterThan(0);
+      expect(auditEvents).toEqual(['First event', 'Second event', 'Third event'].slice(0, auditEvents.length));
+
+      const tasks = Array.from({ length: 12 }, (_, index) => ({
+        id: String(index + 1), index: index + 1, title: `narrow-task-${index + 1}`,
+        status: 'pending' as const,
+      }));
+      const { stdin: teamStdin, lastFrame: teamFrame } = render(
+        <App snapshot={{ ...sampleSnapshot, tasks }} ledger={sampleLedger}
+          onWritePty={vi.fn()} onRequestQuit={vi.fn()} dimensions={{ columns: 60, rows: 18 }} />
+      );
+      teamStdin.write('\t');
+      expect(teamFrame()).toContain('Tasks · artifacts');
+      const teamRows = (teamFrame() ?? '').split('\n')
+        .map((line) => Number(line.match(/narrow-task-(\d+)/)?.[1]))
+        .filter(Number.isFinite);
+      expect(teamRows.length).toBeGreaterThan(0);
+      expect(teamRows.slice(1).every((number, index) => number === teamRows[index] + 1)).toBe(true);
+    });
+
+    it('passes Windows pause delivery feedback through to the integrated footer', () => {
+      const store = createMockTranscriptStore(vi.fn(), vi.fn());
+      const { stdin, lastFrame } = render(
+        <App snapshot={sampleSnapshot} ledger={sampleLedger} transcriptStore={store}
+          onWritePty={vi.fn()} onRequestQuit={vi.fn()} dimensions={{ columns: 100, rows: 32 }} />
+      );
+      stdin.write('/pause\r');
+      expect(lastFrame()).toContain('Paused: Windows queues input');
+    });
+
+    it('tracks actual stdout resize events without a dimensions prop', () => {
+      const columns = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+      const rows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
+      try {
+        Object.defineProperty(process.stdout, 'columns', { configurable: true, value: 30 });
+        Object.defineProperty(process.stdout, 'rows', { configurable: true, value: 8 });
+        const { stdin, stdout, lastFrame, unmount } = render(
+          <App snapshot={sampleSnapshot} ledger={sampleLedger} onWritePty={vi.fn()} onRequestQuit={vi.fn()} />
+        );
+        Object.defineProperty(stdout, 'columns', { configurable: true, value: 30 });
+        (stdout as any).rows = 8;
+        stdout.emit('resize');
+        expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(8);
+        Object.defineProperty(stdout, 'columns', { configurable: true, value: 100 });
+        (stdout as any).rows = 32;
+        stdout.emit('resize');
+        stdin.write('grown');
+        expect(lastFrame()).toContain('grown');
+        unmount();
+      } finally {
+        if (columns) Object.defineProperty(process.stdout, 'columns', columns);
+        else delete (process.stdout as any).columns;
+        if (rows) Object.defineProperty(process.stdout, 'rows', rows);
+        else delete (process.stdout as any).rows;
+      }
     });
 
     it('disposes internalStore on unmount to prevent interval leak', async () => {
-      const disposeSpy = vi.spyOn(TranscriptStore.prototype, 'dispose');
       const { unmount } = render(
         <App
           snapshot={sampleSnapshot}
@@ -714,6 +872,7 @@ describe('TUI App Mode Router & Responsive Layout', () => {
           onRequestQuit={vi.fn()}
         />
       );
+      const disposeSpy = vi.spyOn(TranscriptStore.prototype, 'dispose');
 
       await new Promise((r) => setTimeout(r, 20));
       expect(disposeSpy).not.toHaveBeenCalled();

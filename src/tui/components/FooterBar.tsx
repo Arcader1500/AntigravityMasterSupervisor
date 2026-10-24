@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { InputMode, TuiPanelId } from '../../telemetry/types.js';
 import { resolveTheme, type ThemeConfig } from '../theme.js';
+import type { PauseFeedback } from '../transcript-store.js';
 
 export interface FooterBarProps {
   // Conversational props
@@ -9,6 +10,7 @@ export interface FooterBarProps {
   hasFocusedDecision?: boolean;
   decisionOptionCount?: number;
   isPaused?: boolean;
+  pauseFeedback?: PauseFeedback;
   confirmingQuit?: boolean;
   activeOverlay?: null | 'spec' | 'plan' | 'audit' | 'raw';
   theme?: ThemeConfig;
@@ -24,6 +26,7 @@ export const FooterBar: React.FC<FooterBarProps> = ({
   hasFocusedDecision,
   decisionOptionCount,
   isPaused,
+  pauseFeedback,
   confirmingQuit,
   activeOverlay,
   theme,
@@ -116,7 +119,7 @@ export const FooterBar: React.FC<FooterBarProps> = ({
               {' │ '}
             </Text>
           )}
-          <Text color="gray">[P] Pause  [Q] Quit</Text>
+          <Text color="gray">[P] Pause (Windows queues input; POSIX child signal attempted)  [Q] Quit</Text>
         </Box>
       </Box>
     );
@@ -170,10 +173,19 @@ export const FooterBar: React.FC<FooterBarProps> = ({
   }
 
   if (isPaused) {
+    const pauseText = pauseFeedback === 'windows_input_only'
+      ? 'Paused: Windows queues input; the child process may keep running.'
+      : pauseFeedback === 'pause_signal_failed'
+        ? 'Paused: POSIX child signal failed; input is queued.'
+        : pauseFeedback === 'pause_signal_unavailable'
+          ? 'Paused: POSIX child signal unavailable; input is queued.'
+          : pauseFeedback === 'pause_signal_sent_unconfirmed'
+            ? 'Paused: POSIX child signal attempted; confirmation is unavailable.'
+            : 'Paused: signal status unavailable; input is queued.';
     return (
       <Box paddingX={1}>
         <Text color={activeTheme.colors.dim}>
-          /resume   Tab team   Enter open agent   / commands   Ctrl+T take over the terminal
+          {`${pauseText} /resume   Tab team   Enter open agent   / commands   Ctrl+T take over the terminal`}
         </Text>
       </Box>
     );
@@ -182,7 +194,7 @@ export const FooterBar: React.FC<FooterBarProps> = ({
   return (
     <Box paddingX={1}>
       <Text color={activeTheme.colors.dim}>
-        Tab team   Enter open agent   / commands   Ctrl+T take over the terminal
+        Tab team   Enter open agent   /pause queues input (Windows) or attempts a POSIX child signal   / commands   Ctrl+T take over the terminal
       </Text>
     </Box>
   );

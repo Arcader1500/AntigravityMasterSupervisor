@@ -3,10 +3,12 @@ import * as path from 'node:path';
 import { VirtualTerminal } from '../pty/virtual-terminal.js';
 import { PtyRunner } from '../pty/runner.js';
 import { TelemetryParser } from './parser.js';
-import { pollWorkspaceOnce } from './poller.js';
+import { canPromoteLedgerStatus, pollWorkspaceOnce } from './poller.js';
 import { appendLedgerEvent, getLedgerPath, loadLedger, updateLedger } from '../core/ledger.js';
+import type { ProcessOutcome, ProcessRunContext } from '../core/types.js';
 import type {
   ActivityFeedItem,
+  ObservationSource,
   TelemetryEvent,
   TelemetrySnapshot,
   WorkspacePollSnapshot,
@@ -20,6 +22,7 @@ export interface TelemetryStoreOptions {
   pid?: number;
   pollIntervalMs?: number;
   sessionStartedAt?: number;
+  processRun?: ProcessRunContext;
 }
 
 const EXECUTION_SUBAGENT_ROLES = ['orchestrator', 'implementer', 'code-reviewer', 'verifier'];
@@ -35,6 +38,9 @@ export class TelemetryStore {
   private ptyRunner?: Pick<PtyRunner, 'getPid'>;
   private explicitPid?: number;
   private sessionStartedAt?: number;
+  private processRun?: ProcessRunContext;
+  private endedOutcome?: ProcessOutcome;
+  private phaseSource?: ObservationSource;
   private startedAt: number;
   private phaseStartedAt: number;
   private lastPollSnapshot: WorkspacePollSnapshot;
@@ -81,6 +87,8 @@ export class TelemetryStore {
       };
       this.projectDir = path.resolve(opts.projectDir);
       this.sessionStartedAt = opts.sessionStartedAt;
+      this.processRun = opts.processRun;
+      this.endedOutcome = opts.processRun?.outcome;
       this.virtualTerminal = opts.virtualTerminal ?? new VirtualTerminal();
       this.parser = opts.parser ?? new TelemetryParser();
       this.ptyRunner = opts.ptyRunner;
@@ -99,9 +107,7 @@ export class TelemetryStore {
     };
 
     // Initial poll to capture baseline workspace state without treating initial commit as new
-    this.lastPollSnapshot = pollWorkspaceOnce(this.projectDir, {
-      minMtimeMs: this.sessionStartedAt,
-    });
+    this.lastPollSnapshot = this.pollWorkspace();
     if (this.lastPollSnapshot.lastCommit?.sha) {
       this.lastSeenCommitSha = this.lastPollSnapshot.lastCommit.sha;
     }
@@ -122,6 +128,7 @@ export class TelemetryStore {
    * while the session is still in a planning phase.
    */
   private handleTelemetryEvent(event: TelemetryEvent): void {
+    if (this.endedOutcome) return;
     if (event.type !== 'SUBAGENT_DISPATCHED') {
       return;
     }
@@ -130,17 +137,82 @@ export class TelemetryStore {
       return;
     }
 
+    this.phaseSource = event.source ?? 'agent_output';
+
     const ledgerPath = getLedgerPath(this.projectDir);
     if (!fs.existsSync(ledgerPath)) {
       return;
     }
 
-    const { status } = loadLedger(this.projectDir);
-    if (status === 'IDLE' || status === 'PLANNING' || status === 'CHECKPOINT_SPEC') {
-      updateLedger(this.projectDir, (ledger) => {
+    updateLedger(this.projectDir, (ledger) => {
+      if (this.processRun && ledger.sessionId !== this.processRun.sessionId) return;
+      if (!canPromoteLedgerStatus(ledger, this.processRun?.runId)) return;
+      if (ledger.status === 'IDLE' || ledger.status === 'PLANNING' || ledger.status === 'CHECKPOINT_SPEC') {
         ledger.status = 'EXECUTING';
-      });
+      }
+    });
+  }
+
+  private pollWorkspace(): WorkspacePollSnapshot {
+    const ledgerPath = getLedgerPath(this.projectDir);
+    const statusBefore = fs.existsSync(ledgerPath) ? loadLedger(this.projectDir).status : undefined;
+    const snapshot = pollWorkspaceOnce(this.projectDir, {
+      minMtimeMs: this.sessionStartedAt,
+      allowStatusPromotion: !this.endedOutcome,
+    });
+    if (fs.existsSync(ledgerPath)) {
+      const ledger = loadLedger(this.projectDir);
+      if (statusBefore !== ledger.status && ledger.status === 'EXECUTING') {
+        this.phaseSource = 'artifacts';
+      }
     }
+    return snapshot;
+  }
+
+  private getPersistedProcessState(): { outcome?: ProcessOutcome; phaseSource?: ObservationSource } {
+    const ledgerPath = getLedgerPath(this.projectDir);
+    if (!fs.existsSync(ledgerPath)) return {};
+    const ledger = loadLedger(this.projectDir);
+    const event = [...ledger.events].reverse().find((item) =>
+      item.metadata?.kind === 'PROCESS_STARTED' || item.metadata?.kind === 'PROCESS_OUTCOME'
+    );
+    if (!event) return {};
+    const metadata = event.metadata;
+    if (typeof metadata?.runId !== 'string' || metadata.sessionId !== ledger.sessionId ||
+      (this.processRun && metadata.runId !== this.processRun.runId)) {
+      return {};
+    }
+    if (metadata.kind !== 'PROCESS_OUTCOME') return { phaseSource: 'ledger' };
+    const base = { runId: metadata.runId, sessionId: metadata.sessionId, observedAt: event.timestamp };
+    if (metadata.outcomeKind === 'exit') {
+      return { phaseSource: 'ledger', outcome: {
+        ...base,
+        kind: 'exit',
+        ...(typeof metadata.exitCode === 'number' ? { exitCode: metadata.exitCode } : {}),
+        ...(typeof metadata.signal === 'number' ? { signal: metadata.signal } : {}),
+      } };
+    }
+    if (metadata.outcomeKind === 'interrupted') {
+      return { phaseSource: 'ledger', outcome: {
+        ...base,
+        kind: 'interrupted',
+        ...(typeof metadata.supervisorSignal === 'string' ? { supervisorSignal: metadata.supervisorSignal } : {}),
+        ...(typeof metadata.supervisorExitCode === 'number' ? { supervisorExitCode: metadata.supervisorExitCode } : {}),
+      } };
+    }
+    if (metadata.outcomeKind === 'startup_error' && typeof metadata.message === 'string') {
+      return { phaseSource: 'ledger', outcome: { ...base, kind: 'startup_error', message: metadata.message } };
+    }
+    return { phaseSource: 'ledger' };
+  }
+
+  /** Marks this local process generation ended and fences later parser/poller promotions. */
+  public handleProcessOutcome(outcome: ProcessOutcome): void {
+    if (this.processRun && this.processRun.runId !== outcome.runId) return;
+    if (this.endedOutcome) return;
+    this.endedOutcome = outcome;
+    if (this.processRun) this.processRun.outcome = outcome;
+    this.notify();
   }
 
   /**
@@ -155,9 +227,7 @@ export class TelemetryStore {
    * updates cached artifacts and tasks, and notifies listeners.
    */
   public pollNow(): WorkspacePollSnapshot {
-    const currentPoll = pollWorkspaceOnce(this.projectDir, {
-      minMtimeMs: this.sessionStartedAt,
-    });
+    const currentPoll = this.pollWorkspace();
     const currentSha = currentPoll.lastCommit?.sha;
 
     if (
@@ -295,6 +365,10 @@ export class TelemetryStore {
 
     const activityFeed = [...parserState.activityFeed, ...this.extraFeedItems];
 
+    const persistedProcess = this.getPersistedProcessState();
+    const persistedOutcome = persistedProcess.outcome;
+    const processOutcome = persistedOutcome ?? this.endedOutcome;
+    const phaseSource = persistedOutcome ? 'ledger' : this.phaseSource ?? persistedProcess.phaseSource;
     return {
       branch: this.lastPollSnapshot.branch,
       dirtyFilesCount: this.lastPollSnapshot.dirtyFilesCount,
@@ -317,6 +391,9 @@ export class TelemetryStore {
       tasks: this.lastPollSnapshot.tasks,
       activityFeed,
       ptyViewportLines: this.virtualTerminal.getViewportLines(),
+      ...(processOutcome ? { processOutcome } : {}),
+      ...(persistedOutcome ? { processOutcomeSource: 'ledger' as const } : {}),
+      ...(phaseSource ? { phaseSource } : {}),
     };
   }
 }

@@ -16,6 +16,10 @@ export function attachRawPassthrough(
   stdout: NodeJS.WriteStream = process.stdout
 ): RawPassthroughHandle {
   const isRawSupported = Boolean(stdin.isTTY && typeof stdin.setRawMode === 'function');
+  const wasRaw = typeof stdin.isRaw === 'boolean' ? stdin.isRaw : false;
+  const wasPaused = typeof stdin.isPaused === 'function'
+    ? stdin.isPaused()
+    : stdin.readableFlowing === false;
 
   if (isRawSupported) {
     try {
@@ -23,10 +27,6 @@ export function attachRawPassthrough(
     } catch {
       // In some environments, setRawMode may fail if stream is redirected
     }
-  }
-
-  if (typeof stdin.resume === 'function') {
-    stdin.resume();
   }
 
   const onData = (chunk: Buffer | string) => {
@@ -40,9 +40,6 @@ export function attachRawPassthrough(
     }
   };
 
-  stdin.on('data', onData);
-  stdout.on('resize', onResize);
-
   let detached = false;
   const detach = () => {
     if (detached) {
@@ -50,25 +47,26 @@ export function attachRawPassthrough(
     }
     detached = true;
 
-    if (typeof stdin.removeListener === 'function') {
-      stdin.removeListener('data', onData);
-    }
-    if (typeof stdout.removeListener === 'function') {
-      stdout.removeListener('resize', onResize);
-    }
-
-    if (isRawSupported) {
-      try {
-        stdin.setRawMode(false);
-      } catch {
-        // Safe to ignore
-      }
-    }
-
-    if (typeof stdin.pause === 'function') {
-      stdin.pause();
-    }
+    let firstError: unknown;
+    const restore = (action: () => void) => {
+      try { action(); } catch (error) { firstError ??= error; }
+    };
+    if (typeof stdin.removeListener === 'function') restore(() => stdin.removeListener('data', onData));
+    if (typeof stdout.removeListener === 'function') restore(() => stdout.removeListener('resize', onResize));
+    if (isRawSupported) restore(() => stdin.setRawMode(wasRaw));
+    if (wasPaused && typeof stdin.pause === 'function') restore(() => stdin.pause());
+    if (!wasPaused && typeof stdin.resume === 'function') restore(() => stdin.resume());
+    if (firstError) throw firstError;
   };
+
+  try {
+    if (typeof stdin.resume === 'function') stdin.resume();
+    stdin.on('data', onData);
+    stdout.on('resize', onResize);
+  } catch (error) {
+    try { detach(); } catch { /* Preserve the setup error. */ }
+    throw error;
+  }
 
   return { detach };
 }

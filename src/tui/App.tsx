@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { Box, Text, useStdin, useStdout } from 'ink';
+import { Box, Text, measureElement, useStdin, useStdout } from 'ink';
 import type {
   TelemetrySnapshot,
   InputMode,
@@ -19,10 +19,17 @@ import { Transcript } from './components/Transcript.js';
 import { TeamRail, deriveTeamMembers } from './components/TeamRail.js';
 import { ZoomView } from './components/ZoomView.js';
 import { TakeoverView } from './components/TakeoverView.js';
-import { Composer, getComposerPlaceholder, wrapComposerLines } from './components/Composer.js';
+import { Composer, getComposerPlaceholder } from './components/Composer.js';
 import { CommandPalette, filterSlashCommands } from './components/CommandPalette.js';
 import { SpecPlanView } from './components/SpecPlanView.js';
 import { AuditLogView } from './components/AuditLogView.js';
+import { deriveProcessPresentation } from './process-presentation.js';
+import { createInputDecoder } from './input-events.js';
+import type { NormalizedInputEvent } from './input-events.js';
+import type {
+  TranscriptViewportAnchor,
+  TranscriptViewportMetrics,
+} from './transcript-viewport.js';
 
 export type TuiInteractionMode = 'CHAT' | 'TEAM' | 'ZOOM' | 'TAKEOVER';
 export type TuiOverlayId = null | 'spec' | 'plan' | 'audit' | 'raw';
@@ -102,6 +109,14 @@ export const App: React.FC<AppProps> = ({
   const [composerText, setComposerText] = useState<string>('');
   const [paletteIndex, setPaletteIndex] = useState<number>(0);
   const [confirmingQuit, setConfirmingQuit] = useState<boolean>(false);
+  const inputDecoder = useRef(createInputDecoder());
+  const currentInputEvent = useRef<NormalizedInputEvent>();
+  const viewportAnchorRef = useRef<TranscriptViewportAnchor>();
+  const [viewportAnchor, setViewportAnchor] = useState<TranscriptViewportAnchor>();
+  const headerLayout = useRef<React.ElementRef<typeof Box>>(null);
+  const composerLayout = useRef<React.ElementRef<typeof Box>>(null);
+  const footerLayout = useRef<React.ElementRef<typeof Box>>(null);
+  const [chromeRows, setChromeRows] = useState(4);
 
   // Synchronous refs to prevent stale closure captures in input callbacks
   const modeRef = useRef(mode);
@@ -224,7 +239,10 @@ export const App: React.FC<AppProps> = ({
 
   const { stdin, setRawMode } = useStdin();
   useLayoutEffect(() => {
-    if (setRawMode) {
+    const previousRawMode = Boolean(
+      (stdin as NodeJS.ReadStream & { isRaw?: boolean }).isRaw
+    );
+    if (setRawMode && !previousRawMode) {
       try {
         setRawMode(true);
       } catch {
@@ -232,7 +250,7 @@ export const App: React.FC<AppProps> = ({
       }
     }
     return () => {
-      if (setRawMode) {
+      if (setRawMode && !previousRawMode) {
         try {
           setRawMode(false);
         } catch {
@@ -240,7 +258,7 @@ export const App: React.FC<AppProps> = ({
         }
       }
     };
-  }, [setRawMode]);
+  }, [setRawMode, stdin]);
 
   // Derived members and team rail state
   const members = deriveTeamMembers(
@@ -278,7 +296,7 @@ export const App: React.FC<AppProps> = ({
 
   const isRailSideBySide = columns >= 110 && hasStarted;
 
-  const showRules = activeOverlay === null && mode !== 'TAKEOVER';
+  const showRules = rows > 8 && activeOverlay === null && mode !== 'TAKEOVER';
   const showSplitRule = showRules && isRailSideBySide;
   const leftPaneCols = Math.max(1, columns - 33);
   const topRuleText = showSplitRule
@@ -306,6 +324,11 @@ export const App: React.FC<AppProps> = ({
       : null;
 
   const focusedDecision = effectiveStore.getFocusedDecision();
+  const processPresentation = deriveProcessPresentation(ledger, snapshot);
+  const progressSource =
+    snapshot.tasks?.length || snapshot.planPath || snapshot.planContent
+      ? 'artifacts' as const
+      : undefined;
   const decisionOptionCount =
     focusedDecision &&
     (focusedDecision.kind === 'DecisionCard' ||
@@ -320,23 +343,66 @@ export const App: React.FC<AppProps> = ({
     decisionOptionCount,
   });
 
-  const paletteMatches = composerText.startsWith('/')
-    ? filterSlashCommands(composerText)
-    : [];
-  const paletteRows = paletteMatches.length;
-  const composerRows =
-    composerText.length === 0
-      ? 1
-      : wrapComposerLines(composerText, columns - 4, 4).length;
-  // 5 = HeaderBar + top rule + bottom rule + FooterBar + 1 extra for the ZOOM footer wrapping to two lines at 80 columns
-  const bodyRows = Math.max(
-    6,
-    rows -
-      5 -
-      (mode !== 'TAKEOVER' && activeOverlay === null
-        ? composerRows + paletteRows
-        : 0)
-  );
+  useLayoutEffect(() => {
+    const measuredRows = [
+      headerLayout.current,
+      composerLayout.current,
+      footerLayout.current,
+    ]
+      .reduce((sum, node) => sum + (node ? measureElement(node).height : 0), 0);
+    if (measuredRows > 0 && measuredRows !== chromeRows) setChromeRows(measuredRows);
+  });
+  const bodyRows = Math.max(0, rows - chromeRows - (showRules ? 2 : 0));
+
+  const onTranscriptViewportMetrics = (metrics: TranscriptViewportMetrics) => {
+    if (transcriptScrollOffset <= 0) {
+      if (viewportAnchorRef.current) {
+        viewportAnchorRef.current = undefined;
+        setViewportAnchor(undefined);
+      }
+      return;
+    }
+    const measuredAnchor = metrics.anchor;
+    if (!measuredAnchor) return;
+    const prior = viewportAnchorRef.current;
+    const requestedViewportRow =
+      prior?.itemId === measuredAnchor.itemId &&
+      prior.segmentKey === measuredAnchor.segmentKey
+      ? prior.viewportRow
+      : measuredAnchor.viewportRow;
+    const anchor = {
+      ...measuredAnchor,
+      viewportRow: Math.max(
+        0,
+        Math.min(Math.max(0, metrics.visibleRows - 1), requestedViewportRow)
+      ),
+    };
+    viewportAnchorRef.current = anchor;
+    if (
+      prior?.itemId !== anchor.itemId ||
+      prior.segmentKey !== anchor.segmentKey ||
+      prior.sourceOffset !== anchor.sourceOffset ||
+      prior.viewportRow !== anchor.viewportRow
+    ) {
+      setViewportAnchor(anchor);
+    }
+    const row = metrics.segments.find(
+      (segment) =>
+        segment.itemId === anchor.itemId &&
+        segment.segmentKey === anchor.segmentKey &&
+        segment.sourceOffset === anchor.sourceOffset
+    )?.row;
+    if (row !== undefined) {
+      const rebased = Math.max(0, metrics.totalRows - metrics.visibleRows - row + anchor.viewportRow);
+      setTranscriptScrollOffset((current) => current > 0 && current !== rebased ? rebased : current);
+    }
+  };
+
+  const scrollTranscriptBy = (delta: number) => {
+    viewportAnchorRef.current = undefined;
+    setViewportAnchor(undefined);
+    setTranscriptScrollOffset((current) => Math.max(0, current + delta));
+  };
 
   const executeSlashCommand = (raw: string) => {
     const trimmed = raw.trim();
@@ -484,13 +550,13 @@ export const App: React.FC<AppProps> = ({
               if (activeOverlayRef.current !== null) {
                 setOverlayScrollOffset((prev) => Math.max(0, prev - 10));
               } else {
-                setTranscriptScrollOffset((prev) => prev + 5);
+                scrollTranscriptBy(5);
               }
             } else {
               if (activeOverlayRef.current !== null) {
                 setOverlayScrollOffset((prev) => prev + 10);
               } else {
-                setTranscriptScrollOffset((prev) => Math.max(0, prev - 5));
+                scrollTranscriptBy(-5);
               }
             }
             i += pageMatch[0].length;
@@ -501,6 +567,8 @@ export const App: React.FC<AppProps> = ({
           const endMatch = rest.match(/^\x1b(?:\[F|\[4~|OF)/);
           if (endMatch) {
             setTranscriptScrollOffset(0);
+            viewportAnchorRef.current = undefined;
+            setViewportAnchor(undefined);
             effectiveStore.refocusDeferredDecision();
             i += endMatch[0].length;
             continue;
@@ -631,7 +699,10 @@ export const App: React.FC<AppProps> = ({
         const focused = effectiveStore.getFocusedDecision();
         if (focused && composerTextRef.current.length === 0) {
           if (char === '\r' || char === '\n') {
-            effectiveStore.answerFocusedDecision();
+            effectiveStore.answerFocusedDecision(undefined, {
+              id: currentInputEvent.current!.id,
+              decisionId: focused.id,
+            });
             continue;
           }
           if (char >= '1' && char <= '9') {
@@ -673,13 +744,14 @@ export const App: React.FC<AppProps> = ({
           }
           if (focused) {
             effectiveStore.answerFocusedDecision(
-              currentText.length > 0 ? currentText : undefined
+              currentText.length > 0 ? currentText : undefined,
+              { id: currentInputEvent.current!.id, decisionId: focused.id }
             );
             setComposerValue('');
             continue;
           }
           if (currentText.length > 0) {
-            effectiveStore.submitUserMessage(currentText);
+            effectiveStore.submitUserMessage(currentText, currentInputEvent.current?.id);
             setComposerValue('');
             continue;
           }
@@ -695,32 +767,55 @@ export const App: React.FC<AppProps> = ({
       }
     };
 
-    const handleData = (chunk: Buffer | string) => {
-      const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+    function processDecodedChunk(raw: string): void {
+      const events = inputDecoder.current.push(raw);
+      let rawCursor = 0;
+      for (const event of events) {
+        const eventStart = raw.indexOf(event.raw, rawCursor);
+        const eventEnd = eventStart < 0 ? rawCursor : eventStart + event.raw.length;
+        let nextRaw = eventEnd;
+        if (event.raw === '\r' && raw[nextRaw] === '\n') nextRaw++;
 
-      if (modeRef.current === 'TAKEOVER') {
-        const ctrlRightBracketIdx = raw.indexOf('\x1d');
-        if (ctrlRightBracketIdx !== -1) {
-          const prefix = raw.slice(0, ctrlRightBracketIdx);
-          const suffix = raw.slice(ctrlRightBracketIdx + 1);
-
-          if (prefix.length > 0) {
-            onWritePtyRef.current(prefix);
-          }
-
-          setMode('CHAT');
-          modeRef.current = 'CHAT';
-
-          if (suffix.length > 0) {
-            processNavChunk(suffix);
-          }
+        currentInputEvent.current = event;
+        if (
+          event.kind === 'text' &&
+          /[\r\n]/.test(event.raw) &&
+          (modeRef.current === 'CHAT' || modeRef.current === 'ZOOM') &&
+          activeOverlayRef.current === null
+        ) {
+          setComposerValue(composerTextRef.current + event.raw.replace(/\r\n?/g, '\n'));
         } else {
-          onWritePtyRef.current(raw);
+          processNavChunk(event.raw);
         }
+        rawCursor = nextRaw;
+
+        // A mode change can happen in the middle of a single stdin chunk.
+        if (modeRef.current === 'TAKEOVER') {
+          processTakeoverBytes(raw.slice(nextRaw));
+          return;
+        }
+      }
+    }
+
+    function processTakeoverBytes(raw: string): void {
+      const delimiter = raw.indexOf('\x1d');
+      if (delimiter < 0) {
+        if (raw) onWritePtyRef.current(raw);
         return;
       }
+      const prefix = raw.slice(0, delimiter);
+      if (prefix) onWritePtyRef.current(prefix);
+      setMode('CHAT');
+      modeRef.current = 'CHAT';
+      inputDecoder.current.reset();
+      const suffix = raw.slice(delimiter + 1);
+      if (suffix) processDecodedChunk(suffix);
+    }
 
-      processNavChunk(raw);
+    const handleData = (chunk: Buffer | string) => {
+      const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+      if (modeRef.current === 'TAKEOVER') processTakeoverBytes(raw);
+      else processDecodedChunk(raw);
     };
 
     stdin.on('data', handleData);
@@ -729,37 +824,31 @@ export const App: React.FC<AppProps> = ({
     };
   }, [stdin]);
 
-  // Minimum size guard
-  if (columns < 80 || rows < 24) {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Text color={theme.colors.ask}>
-          Make this window at least 80 columns by 24 rows.
-        </Text>
-      </Box>
-    );
-  }
-
   // Render main layout
   return (
     <Box flexDirection="column" width={columns} height={rows} overflow="hidden">
       {/* Header Bar */}
-      <HeaderBar
-        branch={snapshot.branch}
-        totalElapsedMs={snapshot.totalElapsedMs}
-        status={ledger.status}
-        specApproved={ledger.checkpoints?.spec?.status === 'APPROVED'}
-        planApproved={ledger.checkpoints?.plan?.status === 'APPROVED'}
-        currentWave={currentWave}
-        totalWaves={totalWaves}
-        currentTask={activeTaskNumber}
-        totalTasks={tasks.length}
-        pendingDecisionCount={storeSnapshot.pendingDecisionCount}
-        isPaused={storeSnapshot.isPaused}
-        zoomTarget={zoomTarget}
-        theme={theme}
-        glyphs={glyphs}
-      />
+      <Box ref={headerLayout} flexDirection="column" flexShrink={0}>
+        <HeaderBar
+          branch={snapshot.branch}
+          totalElapsedMs={snapshot.totalElapsedMs}
+          status={ledger.status}
+          specApproved={ledger.checkpoints?.spec?.status === 'APPROVED'}
+          planApproved={ledger.checkpoints?.plan?.status === 'APPROVED'}
+          currentWave={currentWave}
+          totalWaves={totalWaves}
+          currentTask={activeTaskNumber}
+          totalTasks={tasks.length}
+          pendingDecisionCount={storeSnapshot.pendingDecisionCount}
+          isPaused={storeSnapshot.isPaused}
+          pauseFeedback={storeSnapshot.delivery.pauseFeedback}
+          phaseSource={snapshot.phaseSource}
+          processPresentation={processPresentation}
+          zoomTarget={zoomTarget}
+          theme={theme}
+          glyphs={glyphs}
+        />
+      </Box>
 
       {/* Top structural rule */}
       {showRules && (
@@ -776,12 +865,16 @@ export const App: React.FC<AppProps> = ({
           activeDoc={activeOverlay}
           scrollOffset={overlayScrollOffset}
           maxRows={bodyRows}
+          width={columns}
         />
       ) : activeOverlay === 'audit' ? (
         <AuditLogView
           ledger={ledger}
+          snapshot={snapshot}
+          processPresentation={processPresentation}
           scrollOffset={overlayScrollOffset}
           maxRows={bodyRows}
+          width={columns}
         />
       ) : activeOverlay === 'raw' || mode === 'TAKEOVER' ? (
         <TakeoverView
@@ -791,6 +884,7 @@ export const App: React.FC<AppProps> = ({
           showBanner={false}
         />
       ) : mode === 'TEAM' && !isRailSideBySide ? (
+        <Box height={bodyRows} overflowY="hidden" flexShrink={0}>
         <TeamRail
           members={members}
           tasks={tasks}
@@ -798,10 +892,12 @@ export const App: React.FC<AppProps> = ({
           selectedMemberIndex={safeMemberIndex}
           isFocused={true}
           handledCounts={storeSnapshot.handledCounts}
+          progressSource={progressSource}
           width={columns}
           theme={theme}
           glyphs={glyphs}
         />
+        </Box>
       ) : (
         <Box
           flexDirection="row"
@@ -839,6 +935,8 @@ export const App: React.FC<AppProps> = ({
                 focusedDecisionId={storeSnapshot.focusedDecision?.id ?? null}
                 theme={theme}
                 glyphs={glyphs}
+                anchor={viewportAnchor}
+                onViewportMetrics={onTranscriptViewportMetrics}
               />
             )}
           </Box>
@@ -867,6 +965,7 @@ export const App: React.FC<AppProps> = ({
               isFocused={mode === 'TEAM'}
               zoomTask={mode === 'ZOOM' ? selectedTask : null}
               handledCounts={storeSnapshot.handledCounts}
+              progressSource={progressSource}
               width={32}
               theme={theme}
               glyphs={glyphs}
@@ -882,7 +981,7 @@ export const App: React.FC<AppProps> = ({
 
       {/* Composer and Command Palette (hidden during takeover and active overlays) */}
       {mode !== 'TAKEOVER' && activeOverlay === null && (
-        <Box flexDirection="column">
+        <Box ref={composerLayout} flexDirection="column" flexShrink={0}>
           {composerText.startsWith('/') && (
             <CommandPalette
               query={composerText}
@@ -902,15 +1001,20 @@ export const App: React.FC<AppProps> = ({
       )}
 
       {/* Footer Bar */}
-      <FooterBar
-        mode={mode}
-        hasFocusedDecision={Boolean(storeSnapshot.focusedDecision)}
-        decisionOptionCount={decisionOptionCount}
-        isPaused={storeSnapshot.isPaused}
-        confirmingQuit={confirmingQuit}
-        activeOverlay={activeOverlay}
-        theme={theme}
-      />
+      {rows > 8 && (
+        <Box ref={footerLayout} flexDirection="column" flexShrink={0}>
+          <FooterBar
+            mode={mode}
+            hasFocusedDecision={Boolean(storeSnapshot.focusedDecision)}
+            decisionOptionCount={decisionOptionCount}
+            isPaused={storeSnapshot.isPaused}
+            confirmingQuit={confirmingQuit}
+            activeOverlay={activeOverlay}
+            pauseFeedback={storeSnapshot.delivery.pauseFeedback}
+            theme={theme}
+          />
+        </Box>
+      )}
     </Box>
   );
 };

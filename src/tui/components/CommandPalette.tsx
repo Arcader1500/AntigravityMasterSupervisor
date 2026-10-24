@@ -12,7 +12,7 @@ export const SLASH_COMMANDS: readonly SlashCommandItem[] = [
   { command: '/plan', description: 'Full-screen plan viewer' },
   { command: '/audit', description: 'Full-screen audit ledger' },
   { command: '/raw', description: 'Take over the terminal' },
-  { command: '/pause', description: 'Pause the team' },
+  { command: '/pause', description: 'Queue input; POSIX child signal attempted, Windows input-only' },
   { command: '/resume', description: 'Resume the team' },
   { command: '/decide', description: 'Jump to pending decision' },
   { command: '/help', description: 'List keys and commands' },

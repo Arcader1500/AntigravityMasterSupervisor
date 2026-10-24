@@ -27,7 +27,7 @@ describe('DelegationCard', () => {
       status: 'running',
       nowSentence: 'The implementer is writing src/middleware/limiter.ts, 1m 12s in.',
       elapsedFormatted: '1m 12s',
-      testSummaryText: '14 of 14 tests pass so far.',
+      testSummaryText: '14 of 14 tests pass so far, as reported by agent output.',
       timestamp: '2026-10-19T10:00:00Z',
     };
 
@@ -37,7 +37,7 @@ describe('DelegationCard', () => {
     expect(frame).toContain('Task 3: Route middleware');
     expect(frame).toContain('wave 2 of 3');
     expect(frame).toContain('The implementer is writing src/middleware/limiter.ts, 1m 12s in.');
-    expect(frame).toContain('14 of 14 tests pass so far.');
+    expect(frame).toContain('14 of 14 tests pass so far, as reported by agent output.');
   });
 
   it('renders task count fallback when wave information is not present', () => {
@@ -104,7 +104,7 @@ describe('DelegationCard', () => {
     expect(frame).toContain('Task 1: Scaffold module');
   });
 
-  it('collapses to a plain line with done glyph when completed, including commit SHA', () => {
+  it('collapses a reported completion with attribution and review status, including commit SHA', () => {
     const item: Extract<TranscriptItem, { kind: 'DelegationCard' }> = {
       id: 'del-done',
       kind: 'DelegationCard',
@@ -122,7 +122,9 @@ describe('DelegationCard', () => {
     const { lastFrame } = render(<DelegationCard item={item} theme={theme} glyphs={glyphs} />);
     const frame = lastFrame() ?? '';
 
-    expect(frame).toContain(`${glyphs.done} Task 3: Route middleware`);
+    expect(frame).toContain('• Task 3: Route middleware');
+    expect(frame).toContain('reported completion (agent output)');
+    expect(frame).toContain('review and verification are unconfirmed');
     expect(frame).toContain('7f3a9b1');
   });
 
@@ -135,7 +137,7 @@ describe('DelegationCard', () => {
       title: 'Redis persistence',
       role: 'implementer',
       status: 'completed_with_concerns',
-      nextStepText: 'Finished with concerns. Reviewer will check.',
+      nextStepText: 'implementer reported DONE_WITH_CONCERNS; review and verification are unconfirmed.',
       nowSentence: '',
       elapsedFormatted: '3m',
       timestamp: '2026-10-19T10:00:00Z',
@@ -144,8 +146,9 @@ describe('DelegationCard', () => {
     const { lastFrame } = render(<DelegationCard item={item} theme={theme} glyphs={glyphs} />);
     const frame = lastFrame() ?? '';
 
-    expect(frame).toContain(`${glyphs.done} Task 4: Redis persistence`);
-    expect(frame).toContain('Finished with concerns. Reviewer will check.');
+    expect(frame).toContain('• Task 4: Redis persistence');
+    expect(frame).toContain('reported DONE_WITH_CONCERNS (agent output)');
+    expect(frame).toContain('review and verification are unconfirmed');
   });
 });
 
@@ -222,8 +225,25 @@ describe('DecisionCard', () => {
     const { lastFrame } = render(<DecisionCard item={item} theme={theme} glyphs={glyphs} />);
     const frame = lastFrame() ?? '';
 
-    expect(frame).toContain('You chose: Redis (cluster-ready).');
+    expect(frame).toContain('Input sent: Redis (cluster-ready). Agent acceptance is unconfirmed.');
     expect(frame).not.toContain('..');
+  });
+
+  it('labels queued, written and failed delivery without claiming agent acceptance', () => {
+    const base: Extract<TranscriptItem, { kind: 'DecisionCard' }> = {
+      id: 'delivery', kind: 'DecisionCard', promptKind: 'ask_question', headline: 'Question',
+      question: 'Continue?', options: [{ index: 1, label: 'Yes' }], status: 'pending',
+      selectedOptionIndex: 1, timestamp: 'now',
+    };
+    for (const [delivery, expected] of [
+      ['queued', 'Response queued locally'],
+      ['written', 'Input write callback returned'],
+      ['error', 'Input delivery error: pipe closed'],
+    ] as const) {
+      const { lastFrame } = render(<DecisionCard item={{ ...base, delivery, deliveryError: delivery === 'error' ? 'pipe closed' : undefined }} />);
+      expect(lastFrame() ?? '').toContain(expected);
+      expect(lastFrame() ?? '').toContain('agent acceptance is unconfirmed');
+    }
   });
 });
 
@@ -303,7 +323,7 @@ describe('FailureCard', () => {
     const { lastFrame } = render(<FailureCard item={item} theme={theme} glyphs={glyphs} />);
     const frame = lastFrame() ?? '';
 
-    expect(frame).toContain('You chose: Retry the task.');
+    expect(frame).toContain('Input sent: Retry the task. Agent acceptance is unconfirmed.');
   });
 });
 
@@ -383,7 +403,7 @@ describe('Transcript', () => {
     expect(frame).toContain('Task 3: Redis persistence');
   });
 
-  it('renders CompletionCard with round border and completion details followed by plain next-steps line', () => {
+  it('renders historical CompletionCard as a ledger record with unverified text', () => {
     const items: TranscriptItem[] = [
       {
         id: 'comp-1',
@@ -402,9 +422,14 @@ describe('Transcript', () => {
 
     expect(frame).toContain('feat/rate-limit');
     expect(frame).toContain('6');
-    expect(frame).toContain('All checks passed');
+    expect(frame).toContain('Recorded verifier text (unverified): All checks passed');
+    expect(frame).toContain('Legacy ledger status: COMPLETED');
+    expect(frame).toContain('Review and verification are unconfirmed');
+    expect(frame).toContain('Source: recorded ledger.');
+    expect(frame).not.toContain('Completed on');
+    expect(frame).not.toContain('merge when you are ready');
     expect(frame).toContain('4m 32s');
-    expect(frame).toContain('Review the branch, then merge when you are ready.');
+    expect(frame).toContain('Review and verification are unconfirmed.');
   });
 
   it('shows at most 3 live DelegationCards and collapses extra into "+N more running"', () => {

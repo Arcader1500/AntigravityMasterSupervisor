@@ -3,11 +3,24 @@ import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { checkGitRepo } from '../core/discovery.js';
 import { updateLedger, getLedgerPath } from '../core/ledger.js';
+import type { SupervisorLedger } from '../core/types.js';
 import type { PlanTaskItem, TaskChecklistItem, WorkspacePollSnapshot } from './types.js';
 
 export interface PollWorkspaceOptions {
   syncLedger?: boolean;
   minMtimeMs?: number;
+  allowStatusPromotion?: boolean;
+}
+
+/** The most recent explicit process start reopens promotion; an outcome closes it. */
+export function canPromoteLedgerStatus(ledger: SupervisorLedger, runId?: string): boolean {
+  const latest = [...ledger.events].reverse().find((event) =>
+    event.metadata?.kind === 'PROCESS_STARTED' || event.metadata?.kind === 'PROCESS_OUTCOME'
+  );
+  if (!latest) return true;
+  if (latest.metadata?.sessionId !== ledger.sessionId) return false;
+  if (latest?.metadata?.kind === 'PROCESS_OUTCOME') return false;
+  return runId === undefined || latest?.metadata?.runId === runId;
 }
 
 /**
@@ -344,6 +357,8 @@ export function pollWorkspaceOnce(
             ledger.checkpoints.plan.status = 'PENDING';
           }
           if (
+            options?.allowStatusPromotion !== false &&
+            canPromoteLedgerStatus(ledger) &&
             tasks.length > 0 &&
             (ledger.status === 'PLANNING' || ledger.status === 'IDLE')
           ) {

@@ -1,6 +1,10 @@
+import type { ProcessOutcome } from '../core/types.js';
+
 export type TuiPanelId = 1 | 2 | 3 | 4;
 
 export type InputMode = 'NAVIGATION' | 'PTY_INTERACT';
+
+export type ObservationSource = 'agent_output' | 'artifacts' | 'ledger';
 
 export interface ActivityFeedItem {
   id: string;
@@ -41,15 +45,16 @@ export interface AgentStepItem {
   status: 'running' | 'ok' | 'failed_recovered' | 'failed';
 }
 
-export type TelemetryEvent =
+export type TelemetryEvent = (
   | { type: 'SUBAGENT_DISPATCHED'; role: string; timestamp: string; rawLine: string }
   | { type: 'TOOL_CALLED'; agent: string; toolName: string; target?: string; addedLines?: number; mcpQuery?: string; timestamp: string }
   | { type: 'COMMAND_STARTED'; agent: string; command: string; timestamp: string }
   | { type: 'COMMAND_FINISHED'; agent: string; command: string; exitCode: number; testSummary?: { passed: number; failed: number }; timestamp: string }
   | { type: 'TEST_SUMMARY'; agent: string; passed: number; failed: number; timestamp: string }
   | { type: 'ERROR_LINE'; agent: string; message: string; timestamp: string }
-  | { type: 'SUBAGENT_COMPLETED'; role: string; verdict: 'DONE' | 'DONE_WITH_CONCERNS' | 'NEEDS_CONTEXT' | 'BLOCKED' | 'APPROVE' | 'REQUEST_CHANGES' | 'PASS' | 'FAIL'; reason?: string; elapsedMs: number; timestamp: string }
-  | { type: 'DECISION_PROMPT'; promptKind: 'ask_question' | 'permission' | 'checkpoint_spec'; headline: string; question: string; contextLine?: string; command?: string; options: Array<{ index: number; label: string; recommended?: boolean }>; timestamp: string };
+  | { type: 'SUBAGENT_COMPLETED'; role: string; verdict: 'READY' | 'DONE' | 'DONE_WITH_CONCERNS' | 'NEEDS_CONTEXT' | 'BLOCKED' | 'APPROVE' | 'REQUEST_CHANGES' | 'PASS' | 'FAIL'; reason?: string; elapsedMs: number; timestamp: string }
+  | { type: 'DECISION_PROMPT'; promptKind: 'ask_question' | 'permission' | 'checkpoint_spec'; headline: string; question: string; contextLine?: string; command?: string; options: Array<{ index: number; label: string; recommended?: boolean }>; timestamp: string }
+) & { source?: ObservationSource };
 
 export interface ParserState {
   mainAgent: string;
@@ -78,6 +83,9 @@ export interface WorkspacePollSnapshot {
 }
 
 export interface TelemetrySnapshot {
+  processOutcome?: ProcessOutcome;
+  processOutcomeSource?: ObservationSource;
+  phaseSource?: ObservationSource;
   branch: string;
   dirtyFilesCount: number;
   lastCommit?: {

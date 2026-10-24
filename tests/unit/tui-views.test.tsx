@@ -1,6 +1,7 @@
 import React from 'react';
 import { describe, it, expect } from 'vitest';
 import { render } from 'ink-testing-library';
+import { Box } from 'ink';
 import { formatDuration } from '../../src/tui/components/HeaderBar.js';
 import { SpecPlanView } from '../../src/tui/components/SpecPlanView.js';
 import { AuditLogView } from '../../src/tui/components/AuditLogView.js';
@@ -33,7 +34,7 @@ describe('SpecPlanView component', () => {
         planContent="# Plan Title"
         activeDoc="spec"
         scrollOffset={1}
-        maxRows={2}
+        maxRows={10}
       />
     );
     const frame = lastFrame() ?? '';
@@ -75,6 +76,23 @@ describe('SpecPlanView component', () => {
     expect(frame).toContain('docs/superpowers/specs/');
     expect(frame).toContain('No active spec');
   });
+
+  it('keeps document rows consecutive inside a measured 16-row overlay budget', () => {
+    const content = Array.from({ length: 24 }, (_, index) => `spec-line-${index + 1}`).join('\n');
+    const view = (scrollOffset = 0) => (
+      <Box width={60} height={16} overflow="hidden" flexShrink={0}>
+        <SpecPlanView specPath="spec.md" specContent={content} planPath={null}
+          planContent={null} activeDoc="spec" scrollOffset={scrollOffset} maxRows={16} width={60} />
+      </Box>
+    );
+    const { lastFrame } = render(view());
+    const numbers = (lastFrame() ?? '').split('\n')
+      .map((line) => line.match(/(?:^|│)\s*(\d+) │/)?.[1])
+      .filter((value): value is string => value !== undefined)
+      .map(Number);
+    expect(numbers.length).toBeGreaterThan(0);
+    expect(numbers.slice(1).every((number, index) => number === numbers[index] + 1)).toBe(true);
+  });
 });
 
 describe('AuditLogView component', () => {
@@ -109,7 +127,7 @@ describe('AuditLogView component', () => {
 
   it('renders ledger events sliced by scrollOffset and maxRows', () => {
     const { lastFrame } = render(
-      <AuditLogView ledger={mockLedger} scrollOffset={1} maxRows={1} />
+      <AuditLogView ledger={mockLedger} scrollOffset={1} maxRows={18} width={100} />
     );
     const frame = lastFrame() ?? '';
     expect(frame).toContain('Lint warning encountered');
@@ -126,5 +144,33 @@ describe('AuditLogView component', () => {
     const frame = lastFrame() ?? '';
     expect(frame).toContain('session-xyz-123');
     expect(frame).toContain('No audit events');
+  });
+
+  it('shows legacy COMPLETED as recorded with review and verification unconfirmed', () => {
+    const { lastFrame } = render(<AuditLogView ledger={{ ...mockLedger, status: 'COMPLETED' }} scrollOffset={0} />);
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Recorded status: COMPLETED');
+    expect(frame).toContain('Legacy ledger status: COMPLETED');
+    expect(frame).toContain('Source: recorded ledger');
+    expect(frame).toContain('Review and verification are unconfirmed.');
+    expect(frame).not.toContain('Status: COMPLETED');
+  });
+
+  it('keeps audit event messages consecutive inside a measured 18-row overlay budget', () => {
+    const events = Array.from({ length: 24 }, (_, index) => ({
+      timestamp: `13:00:${String(index).padStart(2, '0')}`,
+      level: 'INFO' as const,
+      message: `audit-marker-${index}`,
+    }));
+    const { lastFrame } = render(
+      <Box width={60} height={18} overflow="hidden" flexShrink={0}>
+        <AuditLogView ledger={{ ...mockLedger, events }} scrollOffset={0} maxRows={18} width={60} />
+      </Box>
+    );
+    const markers = (lastFrame() ?? '').split('\n')
+      .map((line) => Number(line.match(/audit-marker-(\d+)/)?.[1]))
+      .filter(Number.isFinite);
+    expect(markers.length).toBeGreaterThan(0);
+    expect(markers.slice(1).every((number, index) => number === markers[index] + 1)).toBe(true);
   });
 });

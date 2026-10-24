@@ -107,7 +107,7 @@ describe('deriveTeamMembers', () => {
 
     expect(members[2].role).toBe('code-reviewer');
     expect(members[2].taskNumber).toBe(2);
-    expect(members[2].statusText).toBe('approved');
+    expect(members[2].statusText).toBe('waiting');
 
     expect(members[3].role).toBe('verifier');
     expect(members[3].statusText).toBe('after Task 5');
@@ -121,6 +121,24 @@ describe('deriveTeamMembers', () => {
     const impl = members.find((m) => m.role === 'implementer');
     expect(impl?.statusText).toBe('paused');
     expect(impl?.needsYou).toBe(false);
+  });
+
+  it('marks retained activity historical after a process outcome or legacy terminal ledger state', () => {
+    const snapshot = createMockSnapshot({
+      activeSubagent: 'implementer',
+      tasks: [{ id: 't1', index: 1, title: 'Task 1', status: 'in_progress' }],
+      processOutcome: {
+        runId: 'run-1', sessionId: 'session-1', observedAt: '2026-10-24T00:00:00.000Z',
+        kind: 'exit', exitCode: 0,
+      },
+    });
+    const ended = deriveTeamMembers(snapshot, 0, false, 'IDLE');
+    expect(ended.every((member) => member.statusText !== 'running')).toBe(true);
+    expect(ended.find((member) => member.id === 'implementer')).toMatchObject({ statusText: 'ended', taskNumber: 1 });
+
+    const legacy = deriveTeamMembers({ ...snapshot, processOutcome: undefined }, 0, false, 'COMPLETED');
+    expect(legacy.every((member) => member.statusText !== 'running')).toBe(true);
+    expect(legacy.find((member) => member.id === 'orchestrator')?.statusText).toBe('ended');
   });
 });
 
@@ -201,7 +219,7 @@ describe('TeamRail component', () => {
     expect(frame).toContain('1m 12s');
     expect(frame).toContain('├ code-reviewer');
     expect(frame).toContain('Task 2');
-    expect(frame).toContain('approved');
+    expect(frame).toContain('recorded');
     expect(frame).toContain('└ verifier');
     expect(frame).toContain('after Task 5');
   });
@@ -241,8 +259,8 @@ describe('TeamRail component', () => {
     );
     const frame = lastFrame() ?? '';
     expect(frame).toContain('Tasks');
-    expect(frame).toContain('✓ 1 Redis schema');
-    expect(frame).toContain('✓ 2 Token bucket');
+    expect(frame).toContain('· 1 Redis schema');
+    expect(frame).toContain('· 2 Token bucket');
     expect(frame).toContain('▸ 3 Route middleware');
     expect(frame).toContain('  4 Integration tests');
     // Truncated title with ellipsis
@@ -250,7 +268,30 @@ describe('TeamRail component', () => {
     expect(frame).not.toContain('Very long task title that exceeds 32 characters in width');
   });
 
-  it('renders Tasks appear once the plan is approved during planning phase', () => {
+  it('labels legacy COMPLETED as recorded ledger state with review unconfirmed', () => {
+    const { lastFrame } = render(<TeamRail members={sampleMembers} tasks={sampleTasks} ledgerStatus="COMPLETED" glyphs={unicodeGlyphs} theme={theme} />);
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Legacy ledger status COMPLETED');
+    expect(frame.replace(/\n\s*/g, ' ')).toContain('review and verification are unconfirmed');
+  });
+
+  it('attributes populated task progress to its source and marks it historical after process exit', () => {
+    const endedMembers = deriveTeamMembers(createMockSnapshot({
+      activeSubagent: 'implementer',
+      tasks: sampleTasks,
+      processOutcome: {
+        runId: 'run-1', sessionId: 'session-1', observedAt: '2026-10-24T00:00:00.000Z',
+        kind: 'exit', exitCode: 0,
+      },
+    }), 0, false, 'IDLE');
+    const { lastFrame } = render(<TeamRail members={endedMembers} tasks={sampleTasks} ledgerStatus="IDLE" progressSource="artifacts" glyphs={unicodeGlyphs} theme={theme} />);
+    const frame = (lastFrame() ?? '').replace(/\s+/g, ' ');
+    expect(frame).toContain('Tasks · artifacts; process ended');
+    expect(frame).toContain('(in progress)');
+    expect(frame).not.toContain('▸ 3');
+  });
+
+  it('renders a neutral empty recorded-progress hint', () => {
     const planningMembers: TeamMemberRow[] = [
       { id: 'planner', role: 'planner', isMain: true, statusText: 'running', needsYou: false },
       { id: 'researcher', role: 'researcher', isMain: false, statusText: 'idle', needsYou: false },
@@ -267,7 +308,7 @@ describe('TeamRail component', () => {
     );
     const frame = lastFrame() ?? '';
     expect(frame).toContain('planner');
-    expect(frame.replace(/\n\s*/g, ' ')).toContain('Tasks appear once the plan is approved.');
+    expect(frame.replace(/\n\s*/g, ' ')).toContain('Recorded task progress appears here when available.');
   });
 
   it('renders the empty tasks message on IDLE with no tasks', () => {
@@ -281,7 +322,7 @@ describe('TeamRail component', () => {
       />
     );
     const frame = lastFrame() ?? '';
-    expect(frame.replace(/\n\s*/g, ' ')).toContain('Tasks appear once the plan is approved.');
+    expect(frame.replace(/\n\s*/g, ' ')).toContain('Recorded task progress appears here when available.');
   });
 
   it('renders checklist items in ZOOM mode when zoomTask is provided', () => {
@@ -464,7 +505,12 @@ describe('formatAgentStep helper', () => {
       status: 'ok',
     };
     expect(formatAgentStep(testFinished, false)).toEqual({
-      text: 'Ran npm test: 14 passed, 0 failed',
+      text: 'Ran npm test: 14 passed, 0 failed (summary reported by implementer)',
+      tone: 'text',
+    });
+
+    expect(formatAgentStep({ ...testFinished, testSummary: undefined }, false)).toEqual({
+      text: 'Ran npm test: exit code 0',
       tone: 'text',
     });
 
@@ -556,7 +602,7 @@ describe('ZoomView component', () => {
     '',
   ];
 
-  it('renders summary card with task title, start timer, number word steps and nothing failed', () => {
+  it('renders attributed step summaries without claiming no observed failures means success', () => {
     const { lastFrame } = render(
       <ZoomView
         role="implementer"
@@ -571,7 +617,7 @@ describe('ZoomView component', () => {
     );
     const frame = lastFrame() ?? '';
     expect(frame).toContain('▸ Route middleware');
-    expect(frame).toContain('Started 1m 12s ago. Four steps so far, nothing failed.');
+    expect(frame).toContain('Started 1m 12s ago. Four steps so far, no failures reported.');
     expect(frame).toContain('18:42:10');
     expect(frame).toContain('Read auth.ts, config.ts and limiter.test.ts');
     expect(frame).toContain('Wrote src/middleware/limiter.ts (+84 lines)');
@@ -621,7 +667,7 @@ describe('ZoomView component', () => {
       />
     );
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Two steps so far, 2 failed.');
+    expect(frame).toContain('Two steps so far, 2 failures reported.');
   });
 
   it('clamps scrollOffset to steps.length - 1 to avoid blanking steps', () => {
@@ -637,7 +683,7 @@ describe('ZoomView component', () => {
       />
     );
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Ran npx tsc --noEmit -p tsconfig.json: ok');
+    expect(frame).toContain('Ran npx tsc --noEmit -p tsconfig.json: outcome unknown');
     expect(frame).not.toContain('Read auth.ts');
   });
 });

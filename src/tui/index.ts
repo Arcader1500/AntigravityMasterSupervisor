@@ -10,7 +10,8 @@ import type {
   TuiPanelId,
   InputMode,
 } from '../telemetry/types.js';
-import type { SupervisorLedger } from '../core/types.js';
+import type { ProcessOutcome, ProcessRunContext, SupervisorLedger } from '../core/types.js';
+import { createProcessRunContext, recordProcessOutcome } from '../core/process-outcome.js';
 import {
   App,
   type AppProps,
@@ -112,6 +113,8 @@ export interface MountSupervisorTuiOptions {
   initialPanel?: TuiPanelId;
   initialInputMode?: InputMode;
   sessionStartedAt?: number;
+  processRun?: ProcessRunContext;
+  processOutcomeOwner?: 'caller' | 'mount';
 }
 
 export interface SupervisorTuiInstance {
@@ -120,6 +123,7 @@ export interface SupervisorTuiInstance {
   store: TelemetryStore;
   virtualTerminal: VirtualTerminal;
   transcriptStore?: TranscriptStore;
+  handleProcessOutcome?: (outcome: ProcessOutcome) => void;
 }
 
 interface SupervisorTuiContainerProps {
@@ -189,168 +193,207 @@ const SupervisorTuiContainer: React.FC<SupervisorTuiContainerProps> = ({
 export function mountSupervisorTui(
   options: MountSupervisorTuiOptions
 ): SupervisorTuiInstance {
-  const cols = process.stdout.columns || 80;
-  const rows = Math.max(10, (process.stdout.rows || 30) - 6);
-
-  const virtualTerminal = new VirtualTerminal({ cols, rows });
-  const parser = new TelemetryParser({ mainAgent: options.mainAgent });
-  const store = new TelemetryStore({
-    projectDir: options.projectDir,
-    virtualTerminal,
-    parser,
-    ptyRunner: options.ptyRunner,
-    sessionStartedAt: options.sessionStartedAt,
-  });
-
-  const onWritePty = (data: string) => {
-    parser.clearWaitingForInput();
-    store.notify();
-    options.ptyRunner.write(data);
-  };
-
+  const originalRawMode = typeof process.stdin.isRaw === 'boolean' ? process.stdin.isRaw : false;
+  const originalInputPaused = typeof process.stdin.isPaused === 'function'
+    ? process.stdin.isPaused()
+    : process.stdin.readableFlowing === false;
   const initialLedger = loadLedger(options.projectDir);
-  let cleanupRef: (() => void) | null = null;
-
-  const transcriptStore = new TranscriptStore({
-    telemetryStore: store,
-    parser,
-    initialLedger,
-    onWritePty,
-    getPtyPid: () => options.ptyRunner.getPid?.(),
-    onRingBell: () => {
-      try {
-        process.stdout.write('\x07');
-      } catch {
-        // ignore
-      }
-    },
-    onRequestQuit: () => {
-      cleanupRef?.();
-    },
-  });
-
-  options.ptyRunner.onData((chunk) => {
-    void virtualTerminal.write(chunk).then(() => {
-      store.notify();
+  const processRun = options.processRun ?? createProcessRunContext(initialLedger.sessionId);
+  const ownsOutcomePersistence = options.processOutcomeOwner === 'mount' ||
+    (options.processOutcomeOwner === undefined && options.processRun === undefined);
+  if (ownsOutcomePersistence && !processRun.outcome) {
+    updateLedger(options.projectDir, (ledger) => {
+      ledger.events.push({
+        timestamp: new Date().toISOString(),
+        level: 'INFO',
+        message: 'Supervisor TUI process started',
+        metadata: { kind: 'PROCESS_STARTED', runId: processRun.runId, sessionId: processRun.sessionId },
+      });
     });
-  });
-
-  const handleResize = () => {
-    const newCols = process.stdout.columns || 80;
-    const newRows = Math.max(10, (process.stdout.rows || 30) - 6);
-    virtualTerminal.resize(newCols, newRows);
-    options.ptyRunner.resize(newCols, newRows);
-  };
-
-  if (typeof process.stdout.on === 'function') {
-    process.stdout.on('resize', handleResize);
   }
 
-  store.startPolling(2000);
-
-  let currentForceNavSignal = 0;
+  let virtualTerminal: VirtualTerminal | undefined;
+  let store: TelemetryStore | undefined;
+  let transcriptStore: TranscriptStore | undefined;
+  let inkInstance: ReturnType<typeof render> | undefined;
+  let removeDataListener: (() => void) | undefined;
+  let removeExitListener: (() => void) | undefined;
+  let resizeListenerAttached = false;
+  let handleResize: (() => void) | undefined;
+  let screenModeAttempted = false;
+  let disposed = false;
   let isCleanedUp = false;
+  let terminalOutcome = processRun.outcome;
+  let currentForceNavSignal = 0;
+  let cleanupRef: (() => void) | undefined;
 
   let exitPromiseResolve!: () => void;
-  const exitPromise = new Promise<void>((resolve) => {
-    exitPromiseResolve = resolve;
-  });
+  const exitPromise = new Promise<void>((resolve) => { exitPromiseResolve = resolve; });
+  const attempt = (action: () => void) => {
+    try { action(); } catch { /* Continue restoring later resources. */ }
+  };
 
   const cleanup = () => {
     if (isCleanedUp) return;
     isCleanedUp = true;
-
-    transcriptStore.dispose();
-    store.stop();
-
-    if (typeof process.stdout.off === 'function') {
-      process.stdout.off('resize', handleResize);
-    } else if (typeof process.stdout.removeListener === 'function') {
-      process.stdout.removeListener('resize', handleResize);
+    disposed = true;
+    if (transcriptStore) attempt(() => transcriptStore!.dispose());
+    if (store) attempt(() => store!.stop());
+    if (removeDataListener) {
+      const unsubscribe = removeDataListener;
+      removeDataListener = undefined;
+      attempt(unsubscribe);
     }
-
-    virtualTerminal.dispose();
-
-    if (options.ptyRunner.isProcessRunning()) {
-      try {
-        options.ptyRunner.kill();
-      } catch {
-        // ignore
+    if (resizeListenerAttached) {
+      resizeListenerAttached = false;
+      if (handleResize) attempt(() => process.stdout.removeListener('resize', handleResize!));
+    }
+    if (virtualTerminal) attempt(() => virtualTerminal!.dispose());
+    let wasRunning = false;
+    try { wasRunning = options.ptyRunner.isProcessRunning(); } catch { /* Keep cleanup moving. */ }
+    if (wasRunning) attempt(() => options.ptyRunner.kill());
+    if (inkInstance) {
+      const instance = inkInstance;
+      inkInstance = undefined;
+      attempt(() => instance.unmount());
+    }
+    if (process.stdout.isTTY) attempt(() => process.stdout.write('\x1b[?25h'));
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+      attempt(() => process.stdin.setRawMode(originalRawMode));
+    }
+    if (process.stdin.isTTY) {
+      if (originalInputPaused && typeof process.stdin.pause === 'function') attempt(() => process.stdin.pause());
+      if (!originalInputPaused && typeof process.stdin.resume === 'function') attempt(() => process.stdin.resume());
+    }
+    if (screenModeAttempted && process.stdout.isTTY) attempt(() => process.stdout.write('\x1b[?1049l'));
+    if (!ownsOutcomePersistence || !wasRunning) {
+      if (removeExitListener) {
+        const unsubscribe = removeExitListener;
+        removeExitListener = undefined;
+        attempt(unsubscribe);
       }
     }
-
-    try {
-      inkInstance.unmount();
-    } catch {
-      // ignore
-    }
-
-    if (process.stdout.isTTY) {
-      // Exit alt-screen
-      process.stdout.write('\x1b[?1049l');
-    }
-
     exitPromiseResolve();
   };
   cleanupRef = cleanup;
 
-  const rerenderContainer = () => {
-    inkInstance.rerender(
-      React.createElement(SupervisorTuiContainer, {
-        store,
-        transcriptStore,
-        projectDir: options.projectDir,
-        onWritePty,
-        onRequestQuit: cleanup,
-        initialPanel: options.initialPanel,
-        initialInputMode: options.initialInputMode,
-        forceNavSignal: currentForceNavSignal,
-      })
-    );
+  const onWritePty = (data: string) => {
+    if (disposed) return;
+    parser.clearWaitingForInput();
+    store?.notify();
+    options.ptyRunner.write(data);
   };
-
-  options.ptyRunner.onExit((code) => {
+  const parser = new TelemetryParser({ mainAgent: options.mainAgent });
+  const projectOutcome = (outcome: ProcessOutcome) => {
+    if (outcome.runId !== processRun.runId || outcome.sessionId !== processRun.sessionId || terminalOutcome) return;
+    terminalOutcome = outcome;
+    processRun.outcome = outcome;
+    store?.handleProcessOutcome(outcome);
+    if (ownsOutcomePersistence) {
+      try { recordProcessOutcome(options.projectDir, outcome); } catch { /* The original startup/exit result remains primary. */ }
+    }
+    transcriptStore?.handleProcessOutcome(outcome);
     currentForceNavSignal++;
-    if (code !== 0) {
-      transcriptStore.handlePtyExit(code);
+    if (!disposed && inkInstance && store && transcriptStore) {
+      try {
+        inkInstance.rerender(React.createElement(SupervisorTuiContainer, {
+          store, transcriptStore, projectDir: options.projectDir,
+          onWritePty, onRequestQuit: cleanup, initialPanel: options.initialPanel,
+          initialInputMode: options.initialInputMode, forceNavSignal: currentForceNavSignal,
+        }));
+      } catch { /* A teardown race must not undo persisted outcome evidence. */ }
     }
-    try {
-      updateLedger(options.projectDir, (l) => {
-        l.status = code === 0 ? 'COMPLETED' : 'FAILED';
-      });
-    } catch {
-      // ignore
-    }
-    store.notify();
-    rerenderContainer();
-  });
-
-  if (process.stdout.isTTY) {
-    // Enter alt-screen
-    process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H');
-  }
-
-  const inkInstance = render(
-    React.createElement(SupervisorTuiContainer, {
-      store,
-      transcriptStore,
-      projectDir: options.projectDir,
-      onWritePty,
-      onRequestQuit: cleanup,
-      initialPanel: options.initialPanel,
-      initialInputMode: options.initialInputMode,
-      forceNavSignal: currentForceNavSignal,
-    }),
-    { exitOnCtrlC: false }
-  );
-
-  inkInstance.waitUntilExit().then(() => cleanup()).catch(() => cleanup());
-
-  return {
-    unmount: cleanup,
-    waitUntilExit: () => exitPromise,
-    store,
-    virtualTerminal,
-    transcriptStore,
   };
+
+  try {
+    const cols = Math.max(1, process.stdout.columns || 80);
+    const rows = Math.max(1, (process.stdout.rows || 30) - 6);
+    virtualTerminal = new VirtualTerminal({ cols, rows });
+    options.ptyRunner.resize(cols, rows);
+    store = new TelemetryStore({
+      projectDir: options.projectDir,
+      virtualTerminal,
+      parser,
+      ptyRunner: options.ptyRunner,
+      sessionStartedAt: options.sessionStartedAt,
+      processRun,
+    });
+    transcriptStore = new TranscriptStore({
+      telemetryStore: store,
+      parser,
+      initialLedger,
+      processRun,
+      onWritePty,
+      getPtyPid: () => options.ptyRunner.getPid?.(),
+      onRingBell: () => { try { process.stdout.write('\x07'); } catch { /* Ignore closed output. */ } },
+      onRequestQuit: () => cleanupRef?.(),
+    });
+
+    removeDataListener = options.ptyRunner.onData((chunk) => {
+      if (disposed || !virtualTerminal || !store) return;
+      void virtualTerminal.write(chunk).then(() => {
+        if (!disposed) store?.notify();
+      }).catch(() => { /* Ignore writes after terminal disposal. */ });
+    });
+
+    handleResize = () => {
+      if (disposed || !virtualTerminal) return;
+      const newCols = Math.max(1, process.stdout.columns || 80);
+      const newRows = Math.max(1, (process.stdout.rows || 30) - 6);
+      virtualTerminal.resize(newCols, newRows);
+      options.ptyRunner.resize(newCols, newRows);
+    };
+    process.stdout.on('resize', handleResize);
+    resizeListenerAttached = true;
+    store.startPolling(2000);
+
+    removeExitListener = options.ptyRunner.onExit((code, signal) => {
+      projectOutcome({
+        runId: processRun.runId,
+        sessionId: processRun.sessionId,
+        observedAt: new Date().toISOString(),
+        kind: 'exit',
+        exitCode: code,
+        ...(signal !== undefined ? { signal } : {}),
+      });
+      if (ownsOutcomePersistence && isCleanedUp && removeExitListener) {
+        const unsubscribe = removeExitListener;
+        removeExitListener = undefined;
+        attempt(unsubscribe);
+      }
+    });
+
+    if (process.stdout.isTTY) {
+      screenModeAttempted = true;
+      process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H');
+    }
+
+    inkInstance = render(React.createElement(SupervisorTuiContainer, {
+      store, transcriptStore, projectDir: options.projectDir, onWritePty,
+      onRequestQuit: cleanup, initialPanel: options.initialPanel,
+      initialInputMode: options.initialInputMode, forceNavSignal: currentForceNavSignal,
+    }), { exitOnCtrlC: false });
+    inkInstance.waitUntilExit().then(() => cleanup()).catch(() => cleanup());
+
+    return {
+      unmount: cleanup,
+      waitUntilExit: () => exitPromise,
+      store,
+      virtualTerminal,
+      transcriptStore,
+      handleProcessOutcome: projectOutcome,
+    };
+  } catch (error) {
+    if (ownsOutcomePersistence && !terminalOutcome) {
+      projectOutcome({
+        runId: processRun.runId,
+        sessionId: processRun.sessionId,
+        observedAt: new Date().toISOString(),
+        kind: 'startup_error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    cleanup();
+    throw error;
+  }
 }

@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
 import { pollWorkspaceOnce, parsePlanTasks } from '../../src/telemetry/poller.js';
-import { initLedger, loadLedger } from '../../src/core/ledger.js';
+import { initLedger, loadLedger, updateLedger } from '../../src/core/ledger.js';
+import { createProcessRunContext, recordProcessOutcome } from '../../src/core/process-outcome.js';
 
 describe('telemetry/poller', () => {
   describe('parsePlanTasks', () => {
@@ -172,6 +173,48 @@ Just prose description without checkboxes.
       expect(ledger.checkpoints.spec.status).toBe('PENDING');
       expect(ledger.checkpoints.plan.path).toContain('2026-10-18-demo-plan.md');
       expect(ledger.checkpoints.plan.status).toBe('PENDING');
+    });
+
+    it('retains artifacts but fences status promotion after the latest process outcome until a new start', () => {
+      const plansDir = path.join(tmpDir, 'docs', 'superpowers', 'plans');
+      fs.mkdirSync(plansDir, { recursive: true });
+      fs.writeFileSync(path.join(plansDir, '2026-10-24-ended-plan.md'), '### Task 1: Observed artifact\n- [x] Checkbox is not verification\n');
+      const ledger = initLedger(tmpDir);
+      const run = createProcessRunContext(ledger.sessionId);
+      recordProcessOutcome(tmpDir, {
+        ...run,
+        observedAt: new Date().toISOString(),
+        kind: 'exit',
+        exitCode: 0,
+      });
+
+      const endedPoll = pollWorkspaceOnce(tmpDir);
+      expect(endedPoll.planPath).toContain('2026-10-24-ended-plan.md');
+      expect(endedPoll.tasks[0]?.status).toBe('completed');
+      expect(loadLedger(tmpDir).status).toBe('IDLE');
+
+      updateLedger(tmpDir, (current) => {
+        current.events.push({
+          timestamp: new Date().toISOString(),
+          level: 'INFO',
+          message: 'New process started',
+          metadata: { kind: 'PROCESS_STARTED', runId: 'fresh-run', sessionId: current.sessionId },
+        });
+      });
+      pollWorkspaceOnce(tmpDir);
+      expect(loadLedger(tmpDir).status).toBe('EXECUTING');
+    });
+
+    it('allows callers to suppress only status promotion while continuing artifact synchronization', () => {
+      const plansDir = path.join(tmpDir, 'docs', 'superpowers', 'plans');
+      fs.mkdirSync(plansDir, { recursive: true });
+      fs.writeFileSync(path.join(plansDir, '2026-10-24-no-promotion-plan.md'), '### Task 1: Observed artifact\n- [ ] Open\n');
+      initLedger(tmpDir);
+
+      const snapshot = pollWorkspaceOnce(tmpDir, { allowStatusPromotion: false });
+      expect(snapshot.planPath).toContain('2026-10-24-no-promotion-plan.md');
+      expect(loadLedger(tmpDir).checkpoints.plan.path).toContain('2026-10-24-no-promotion-plan.md');
+      expect(loadLedger(tmpDir).status).toBe('IDLE');
     });
 
     it('falls back to the folder name for the branch outside a git repository', () => {

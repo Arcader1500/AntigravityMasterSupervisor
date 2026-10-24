@@ -184,9 +184,10 @@ export class TelemetryParser {
   }
 
   private emitEvent(event: TelemetryEvent): void {
+    const sourcedEvent = { ...event, source: event.source ?? 'agent_output' };
     for (const listener of this.eventListeners) {
       try {
-        listener(event);
+        listener(sourcedEvent);
       } catch (err) {
         console.error('Error in TelemetryParser event listener:', err);
       }
@@ -328,13 +329,12 @@ export class TelemetryParser {
         verdictMatch ? verdictMatch[1] : (standaloneVerdictMatch ? standaloneVerdictMatch[1] : 'DONE')
       ).toUpperCase();
 
-      const verdict = (
-        rawVerdictMatched === 'READY' ? 'DONE' : rawVerdictMatched
-      ) as
+      const verdict = rawVerdictMatched as
         | 'DONE'
         | 'DONE_WITH_CONCERNS'
         | 'NEEDS_CONTEXT'
         | 'BLOCKED'
+        | 'READY'
         | 'APPROVE'
         | 'REQUEST_CHANGES'
         | 'PASS'

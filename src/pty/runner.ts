@@ -20,8 +20,8 @@ const spawnPty: typeof nodePty.spawn =
  */
 export class PtyRunner {
   private options: PtyRunnerOptions;
-  private dataListeners: DataListener[] = [];
-  private exitListeners: ExitListener[] = [];
+  private dataListeners = new Set<DataListener>();
+  private exitListeners = new Set<ExitListener>();
   private ptyProcess: IPty | null = null;
   private isRunning: boolean = false;
 
@@ -58,15 +58,17 @@ export class PtyRunner {
   /**
    * Subscribes a listener to receive raw output stream chunks from the PTY.
    */
-  onData(callback: DataListener): void {
-    this.dataListeners.push(callback);
+  onData(callback: DataListener): () => void {
+    this.dataListeners.add(callback);
+    return () => this.dataListeners.delete(callback);
   }
 
   /**
    * Subscribes a listener to receive the exit code and optional signal upon process exit.
    */
-  onExit(callback: ExitListener): void {
-    this.exitListeners.push(callback);
+  onExit(callback: ExitListener): () => void {
+    this.exitListeners.add(callback);
+    return () => this.exitListeners.delete(callback);
   }
 
   /**
@@ -257,7 +259,8 @@ export class PtyRunner {
   }
 
   private emitData(data: string): void {
-    for (const listener of this.dataListeners) {
+    for (const listener of [...this.dataListeners]) {
+      if (!this.dataListeners.has(listener)) continue;
       try {
         listener(data);
       } catch (err) {
@@ -267,7 +270,8 @@ export class PtyRunner {
   }
 
   private emitExit(code: number, signal?: number): void {
-    for (const listener of this.exitListeners) {
+    for (const listener of [...this.exitListeners]) {
+      if (!this.exitListeners.has(listener)) continue;
       try {
         listener(code, signal);
       } catch (err) {

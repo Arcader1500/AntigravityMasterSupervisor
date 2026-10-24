@@ -3,17 +3,20 @@ import { Box, Text } from 'ink';
 import type { TranscriptItem } from '../narrator.js';
 import { resolveTheme, type ThemeConfig } from '../theme.js';
 import { resolveGlyphs, type GlyphSet } from '../glyphs.js';
+import { getTranscriptSegmentProbeText, type TranscriptAnchorProbe } from '../transcript-viewport.js';
 
 export interface DelegationCardProps {
   item: Extract<TranscriptItem, { kind: 'DelegationCard' }>;
   theme?: ThemeConfig;
   glyphs?: GlyphSet;
+  anchorProbe?: TranscriptAnchorProbe;
 }
 
 export const DelegationCard: React.FC<DelegationCardProps> = ({
   item,
   theme,
   glyphs,
+  anchorProbe,
 }) => {
   const activeTheme = theme ?? resolveTheme();
   const activeGlyphs = glyphs ?? resolveGlyphs();
@@ -21,27 +24,31 @@ export const DelegationCard: React.FC<DelegationCardProps> = ({
   const [frameIdx, setFrameIdx] = useState(0);
 
   useEffect(() => {
-    if (item.status !== 'running' || activeTheme.noMotion) {
+    if (anchorProbe || item.status !== 'running' || activeTheme.noMotion) {
       return;
     }
     const timer = setInterval(() => {
       setFrameIdx((idx) => (idx + 1) % activeGlyphs.spinnerFrames.length);
     }, 250);
     return () => clearInterval(timer);
-  }, [item.status, activeTheme.noMotion, activeGlyphs.spinnerFrames.length]);
+  }, [anchorProbe, item.status, activeTheme.noMotion, activeGlyphs.spinnerFrames.length]);
+
+  const prefix = (key: string, fallback: string, leading = '') => anchorProbe?.segmentKey === key
+    ? `${leading}${getTranscriptSegmentProbeText(item, key, anchorProbe.sourceOffset) ?? ''}`
+    : fallback;
 
   if (item.status === 'completed' || item.status === 'completed_with_concerns') {
     const commitSuffix = item.commitSha ? `  ${item.commitSha}` : '';
-    const mainLine = `${activeGlyphs.done} Task ${item.taskNumber}: ${item.title}${commitSuffix}`;
+    const source = item.reportSource === 'artifacts' ? 'artifacts' : item.reportSource === 'ledger' ? 'recorded ledger' : 'agent output';
+    const mainLine = `• Task ${item.taskNumber}: ${item.title}${commitSuffix}`;
     const secondLine =
-      item.status === 'completed_with_concerns'
-        ? item.nextStepText || 'Finished with concerns. Reviewer will check.'
-        : null;
+      `${item.role} reported ${item.reportedVerdict ?? (item.status === 'completed_with_concerns' ? 'DONE_WITH_CONCERNS' : 'completion')} (${source}); review and verification are unconfirmed.`;
 
     return (
       <Box flexDirection="column">
-        <Text color={activeTheme.colors.done}>{mainLine}</Text>
-        {secondLine && <Text color={activeTheme.colors.dim}>{secondLine}</Text>}
+        <Text color={activeTheme.colors.text}>{prefix('title', mainLine, `• Task ${item.taskNumber}: `)}</Text>
+        <Text color={activeTheme.colors.dim}>{prefix('report', secondLine)}</Text>
+        {item.nextStepText && <Text color={activeTheme.colors.dim}>{prefix('nextStepText', item.nextStepText)}</Text>}
       </Box>
     );
   }
@@ -81,22 +88,22 @@ export const DelegationCard: React.FC<DelegationCardProps> = ({
             {`${glyph} `}
           </Text>
           <Text bold color={activeTheme.colors.text}>
-            {`Task ${item.taskNumber}: ${item.title}`}
+            {prefix('title', `Task ${item.taskNumber}: ${item.title}`, `Task ${item.taskNumber}: `)}
           </Text>
         </Box>
         {rightMeta ? <Text color={activeTheme.colors.dim}>{rightMeta}</Text> : null}
       </Box>
 
       {item.nowSentence ? (
-        <Text color={activeTheme.colors.text}>{item.nowSentence}</Text>
+        <Text color={activeTheme.colors.text}>{prefix('nowSentence', item.nowSentence)}</Text>
       ) : null}
 
       {item.testSummaryText ? (
-        <Text color={activeTheme.colors.text}>{item.testSummaryText}</Text>
+        <Text color={activeTheme.colors.text}>{prefix('testSummaryText', item.testSummaryText)}</Text>
       ) : null}
 
       {item.nextStepText ? (
-        <Text color={activeTheme.colors.text}>{item.nextStepText}</Text>
+        <Text color={activeTheme.colors.text}>{prefix('nextStepText', item.nextStepText)}</Text>
       ) : null}
     </Box>
   );

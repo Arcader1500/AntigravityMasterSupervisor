@@ -2,10 +2,10 @@ export const FIRST_LAUNCH_NOTE =
   'What do you want built? Describe it in your own words. I will ask you only about decisions the repo cannot answer.';
 
 export const CONTEXT_RESET_NOTE =
-  'The plan is approved. I started a fresh orchestrator so it has the full context window. The planning conversation is not carried over.';
+  'Ledger phase changed to EXECUTING; a fresh orchestrator handoff and conversation reset are unconfirmed.';
 
 export const COMPLETION_NEXT_STEPS_NOTE =
-  'Review the branch, then merge when you are ready.';
+  'Review and verification are unconfirmed.';
 
 export const HELP_TEXT_NOTE =
   `Keyboard shortcuts:
@@ -22,7 +22,7 @@ Slash commands:
   /plan         View implementation plan
   /audit        View audit log
   /raw          Take over terminal
-  /pause        Pause work
+  /pause        Pause input (Windows queues; POSIX child signal attempted)
   /resume       Resume work
   /decide       Jump to next decision
   /help         Show this help message
@@ -113,11 +113,17 @@ export function formatNowSentence(
   return `The ${role} is ${action}.`;
 }
 
-export function formatTestSummarySentence(role: string, passed: number, failed: number): string {
+function reportSourceLabel(source?: 'agent_output' | 'artifacts' | 'ledger'): string {
+  if (source === 'artifacts') return 'artifacts';
+  if (source === 'ledger') return 'recorded ledger';
+  return 'agent output';
+}
+
+export function formatTestSummarySentence(role: string, passed: number, failed: number, source?: 'agent_output' | 'artifacts' | 'ledger'): string {
   if (failed === 0) {
-    return `${passed} of ${passed} tests pass so far.`;
+    return `${passed} of ${passed} tests pass so far, as reported by ${reportSourceLabel(source)}.`;
   }
-  return `${failed} ${failed === 1 ? 'test' : 'tests'} failing, the ${role} is fixing them.`;
+  return `${failed} ${failed === 1 ? 'test' : 'tests'} reported failing by ${reportSourceLabel(source)}; repair status is unconfirmed.`;
 }
 
 export function formatBlockedFallbackReason(role: string): string {
@@ -132,25 +138,25 @@ export function formatPhaseChangeNote(
   waveCount?: number
 ): string {
   if (nextStatus === 'PLANNING') {
-    return 'Spec approved. Planning the tasks.';
+    return 'Ledger phase is PLANNING.';
   }
   if (nextStatus === 'CHECKPOINT_SPEC') {
     return 'Spec draft ready for your review.';
   }
   if (nextStatus === 'EXECUTING') {
     if (waveCount && waveCount > 0) {
-      return `Plan approved. Executing ${taskCount ?? 0} tasks across ${waveCount} waves.`;
+      return `Ledger phase is EXECUTING; ${taskCount ?? 0} tasks across ${waveCount} waves are recorded.`;
     }
     if (taskCount && taskCount > 0) {
-      return `Plan approved. Executing ${taskCount} tasks.`;
+      return `Ledger phase is EXECUTING; ${taskCount} tasks are recorded.`;
     }
-    return 'Plan approved. Starting execution.';
+    return 'Ledger phase is EXECUTING.';
   }
   if (nextStatus === 'COMPLETED') {
-    return 'All tasks completed.';
+    return 'Legacy ledger status COMPLETED; review and verification are unconfirmed.';
   }
   if (nextStatus === 'FAILED') {
-    return 'Execution failed.';
+    return 'Ledger status FAILED was recorded; process outcome details may be unavailable.';
   }
   return `Phase changed from ${prevStatus} to ${nextStatus}.`;
 }

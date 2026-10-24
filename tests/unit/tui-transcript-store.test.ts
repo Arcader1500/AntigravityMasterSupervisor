@@ -7,6 +7,8 @@ import { TelemetryParser } from '../../src/telemetry/parser.js';
 import { TelemetryStore } from '../../src/telemetry/store.js';
 import { initLedger } from '../../src/core/ledger.js';
 import type { SupervisorLedger } from '../../src/core/types.js';
+import { createProcessRunContext } from '../../src/core/process-outcome.js';
+import type { ProcessOutcome } from '../../src/core/types.js';
 import {
   TranscriptStore,
   type TranscriptStoreOptions,
@@ -121,7 +123,7 @@ describe('TranscriptStore', () => {
   });
 
   describe('ledger status transitions and PTY exit', () => {
-    it('calling updateLedger dispatches LEDGER_STATUS_CHANGED, emitting context-reset and completion cards', () => {
+    it('calling updateLedger keeps legacy COMPLETED factual without synthesizing delivery', () => {
       const store = createStore();
 
       // PLANNING -> EXECUTING
@@ -152,8 +154,17 @@ describe('TranscriptStore', () => {
       });
 
       const snapshotAfterCompleted = store.getSnapshot();
-      const completionCard = snapshotAfterCompleted.items.find((i) => i.kind === 'CompletionCard');
-      expect(completionCard).toBeDefined();
+      const completedPhase = snapshotAfterCompleted.items.find(
+        (i) => i.kind === 'PhaseChange' && (i as any).phase === 'COMPLETED'
+      );
+      expect(completedPhase?.kind === 'PhaseChange' && completedPhase.text).toBe(
+        'Legacy ledger status COMPLETED; review and verification are unconfirmed.'
+      );
+      expect(snapshotAfterCompleted.items.some((i) => i.kind === 'CompletionCard')).toBe(false);
+      const renderedNarration = snapshotAfterCompleted.items
+        .map((item) => 'text' in item ? item.text : '')
+        .join('\n');
+      expect(renderedNarration).not.toMatch(/all checks passed|handoff completed|verification passed/i);
       store.dispose();
     });
 
@@ -180,19 +191,15 @@ describe('TranscriptStore', () => {
       store.dispose();
     });
 
-    it('calling handlePtyExit(1) dispatches PTY_EXITED producing a FailureCard with pty_exit', () => {
+    it('calling handlePtyExit(1) records a factual outcome note without a retry card', () => {
       const store = createStore();
 
       store.handlePtyExit(1);
 
       const snapshot = store.getSnapshot();
-      expect(snapshot.pendingDecisionCount).toBe(1);
-      const failureCard = snapshot.items.find((i) => i.kind === 'FailureCard');
-      expect(failureCard).toBeDefined();
-      if (failureCard && failureCard.kind === 'FailureCard') {
-        expect(failureCard.failureKind).toBe('pty_exit');
-        expect(failureCard.options).toHaveLength(3);
-      }
+      expect(snapshot.pendingDecisionCount).toBe(0);
+      expect(snapshot.items.some((i) => i.kind === 'FailureCard')).toBe(false);
+      expect(snapshot.items.some((i) => i.kind === 'SupervisorNote' && i.text.includes('exited with code 1'))).toBe(true);
       store.dispose();
     });
 
@@ -346,7 +353,8 @@ describe('TranscriptStore', () => {
 
     it('defers and refocuses a focused FailureCard', () => {
       const store = createStore();
-      store.handlePtyExit(1);
+      parser.processLine('Invoking subagent implementer for task 2');
+      parser.processLine('Status: BLOCKED');
 
       const focusedFailure = store.getSnapshot().focusedDecision;
       expect(focusedFailure?.kind).toBe('FailureCard');
@@ -404,6 +412,129 @@ describe('TranscriptStore', () => {
   });
 
   describe('soft-pause controller and queueing', () => {
+    it('keeps a paused answer queued until a validated FIFO write succeeds', () => {
+      const store = createStore();
+      parser.processLine('ask_question: Queue this?');
+      parser.processLine('1. Yes');
+      parser.processLine('2. No');
+      const focused = store.getSnapshot().focusedDecision!;
+
+      store.pause();
+      store.answerFocusedDecision(undefined, { id: 'submission-1', decisionId: focused.id });
+      const queued = store.getSnapshot().items.find((item) => item.id === focused.id);
+      expect(queued?.kind === 'DecisionCard' && queued.status).toBe('pending');
+      expect(queued?.kind === 'DecisionCard' && queued.delivery).toBe('queued');
+      expect(ptyWrites).toEqual([]);
+
+      store.resume();
+      const written = store.getSnapshot().items.find((item) => item.id === focused.id);
+      expect(written?.kind === 'DecisionCard' && written.delivery).toBe('written');
+      expect(written?.kind === 'DecisionCard' && written.status).toBe('answered');
+      store.dispose();
+    });
+
+    it('deduplicates a submission across cards but accepts a distinct later identity', () => {
+      const store = createStore();
+      parser.processLine('ask_question: First?');
+      parser.processLine('1. Yes');
+      const first = store.getSnapshot().focusedDecision!;
+      store.answerFocusedDecision(undefined, { id: 'same-id', decisionId: first.id });
+
+      parser.processLine('ask_question: Second?');
+      parser.processLine('1. Go');
+      const second = store.getSnapshot().focusedDecision!;
+      store.answerFocusedDecision(undefined, { id: 'same-id', decisionId: second.id });
+      expect(ptyWrites).toHaveLength(1);
+      store.answerFocusedDecision(undefined, { id: 'next-id', decisionId: second.id });
+      expect(ptyWrites).toHaveLength(2);
+      store.dispose();
+    });
+
+    it('cancels a queued response if the prompt revision changes before resume', () => {
+      const store = createStore();
+      parser.processLine('ask_question: Revision?');
+      parser.processLine('1. Yes');
+      const card = store.getSnapshot().focusedDecision!;
+      store.pause();
+      store.answerFocusedDecision(undefined, { id: 'revision-submit', decisionId: card.id });
+      parser.processLine('2. New option');
+      store.resume();
+      expect(ptyWrites).toEqual([]);
+      const updated = store.getSnapshot().items.find((item) => item.id === card.id);
+      expect(updated?.kind === 'DecisionCard' && updated.delivery).toBe('error');
+      expect(updated?.kind === 'DecisionCard' && updated.deliveryError).toMatch(/changed/i);
+      store.dispose();
+    });
+
+    it('marks a throwing live write as local error without answering or retrying', () => {
+      const store = createStore({ onWritePty: () => { throw new Error('stream closed'); } });
+      parser.processLine('ask_question: Write failure?');
+      parser.processLine('1. Continue');
+      const card = store.getSnapshot().focusedDecision!;
+      store.answerFocusedDecision(undefined, { id: 'throw-submit', decisionId: card.id });
+      const current = store.getSnapshot().items.find((item) => item.id === card.id);
+      expect(current?.kind === 'DecisionCard' && current.status).toBe('pending');
+      expect(current?.kind === 'DecisionCard' && current.delivery).toBe('error');
+      expect(current?.kind === 'DecisionCard' && current.deliveryError).toContain('stream closed');
+      expect(ptyWrites).toEqual([]);
+      store.dispose();
+    });
+
+    it('cancels queued responses on disposal and makes later resume a no-op', () => {
+      const store = createStore();
+      parser.processLine('ask_question: Dispose this?');
+      parser.processLine('1. Continue');
+      const card = store.getSnapshot().focusedDecision!;
+      store.pause();
+      store.answerFocusedDecision(undefined, { id: 'dispose-submit', decisionId: card.id });
+      store.dispose();
+      store.dispose();
+      store.resume();
+      expect(ptyWrites).toEqual([]);
+      const cancelled = store.getSnapshot().items.find((item) => item.id === card.id);
+      expect(cancelled?.kind === 'DecisionCard' && cancelled.delivery).toBe('error');
+      expect(store.getSnapshot().delivery.queuedWrites).toBe(0);
+    });
+
+    it('does not flush queued writes after process outcome or disposal and deduplicates outcomes', () => {
+      const processRun = createProcessRunContext(ledger.sessionId);
+      const store = createStore({ processRun });
+      store.pause();
+      store.submitUserMessage('queued');
+      const outcome: ProcessOutcome = { ...processRun, kind: 'exit', exitCode: 0, observedAt: '2026-10-24T00:00:00.000Z' };
+      store.handleProcessOutcome(outcome);
+      store.handleProcessOutcome(outcome);
+      store.resume();
+      expect(ptyWrites).toEqual([]);
+      expect(store.getSnapshot().items.filter((item) => item.kind === 'SupervisorNote' && item.text.includes('Agent process exited with code 0'))).toHaveLength(1);
+      store.dispose();
+      store.resume();
+      store.submitUserMessage('after disposal');
+      expect(ptyWrites).toEqual([]);
+    });
+
+    it('keeps one fallback process identity for repeated handlePtyExit callbacks', () => {
+      const store = createStore();
+      store.handlePtyExit(0);
+      store.handlePtyExit(0);
+      expect(store.getSnapshot().items.filter((item) => item.kind === 'SupervisorNote' && item.text === 'Agent process exited with code 0')).toHaveLength(1);
+      expect(store.getSnapshot().delivery.terminal).toBe(true);
+      store.dispose();
+    });
+
+    it('reports failed POSIX pause signals and Windows input-only pause separately', () => {
+      vi.spyOn(process, 'kill').mockImplementation(() => { throw new Error('denied'); });
+      const posix = createStore({ platform: 'linux', getPtyPid: () => 4321 });
+      posix.pause();
+      expect(posix.getSnapshot().delivery.pauseFeedback).toBe('pause_signal_failed');
+      posix.dispose();
+
+      const windows = createStore({ platform: 'win32', getPtyPid: () => 4321 });
+      windows.pause();
+      expect(windows.getSnapshot().delivery.pauseFeedback).toBe('windows_input_only');
+      windows.dispose();
+    });
+
     it('queues submitUserMessage and answerFocusedDecision writes when paused, flushing FIFO on resume', () => {
       const store = createStore();
 

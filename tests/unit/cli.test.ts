@@ -264,16 +264,71 @@ describe('CLI Parser', () => {
   });
 
   describe('Run Command Behavior', () => {
-    it('initializes ledger and executes in dry-run mode to COMPLETED status', async () => {
-      await runModule.runCommand(process.cwd(), {
+    it('initializes ledger and records a factual zero-exit outcome in dry-run mode', async () => {
+      await runModule.runCommand(tempBaseDir, {
         dryRun: true,
         agent: 'discovery-bot',
       });
 
-      const ledger = loadLedger(process.cwd());
-      expect(ledger.status).toBe('COMPLETED');
+      const ledger = loadLedger(tempBaseDir);
+      expect(ledger.status).toBe('IDLE');
       expect(ledger.events.some((e) => e.message.includes('started'))).toBe(true);
-      expect(ledger.events.some((e) => e.message.includes('ended with exit code 0'))).toBe(true);
+      const outcomes = ledger.events.filter((e) => e.metadata?.kind === 'PROCESS_OUTCOME');
+      const starts = ledger.events.filter((e) => e.metadata?.kind === 'PROCESS_STARTED');
+      expect(starts).toHaveLength(1);
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]?.metadata).toMatchObject({ outcomeKind: 'exit', exitCode: 0 });
+      expect(outcomes[0]?.metadata?.runId).toBe(starts[0]?.metadata?.runId);
+    });
+
+    it('records a startup_error outcome when the agy binary is missing', async () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await runModule.runCommand(tempBaseDir, { agyBin: 'missing-agy-for-outcome-test' });
+
+      const ledger = loadLedger(tempBaseDir);
+      const started = ledger.events.filter((event) => event.metadata?.kind === 'PROCESS_STARTED');
+      const outcomes = ledger.events.filter((event) => event.metadata?.kind === 'PROCESS_OUTCOME');
+      expect(started).toHaveLength(1);
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]?.metadata).toMatchObject({
+        outcomeKind: 'startup_error',
+        runId: started[0]?.metadata?.runId,
+        sessionId: ledger.sessionId,
+      });
+      expect(ledger.status).toBe('FAILED');
+      expect(process.exitCode).toBe(1);
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('reuses session identity but creates a fresh process identity for each resumed invocation', async () => {
+      await runModule.runCommand(tempBaseDir, { dryRun: true });
+      const initial = loadLedger(tempBaseDir);
+      await runModule.runCommand(tempBaseDir, { dryRun: true, resume: true });
+      await runModule.runCommand(tempBaseDir, { dryRun: true, resume: true });
+      const ledger = loadLedger(tempBaseDir);
+      const runs = ledger.events.filter((e) => e.metadata?.kind === 'PROCESS_STARTED');
+
+      expect(ledger.sessionId).toBe(initial.sessionId);
+      expect(runs).toHaveLength(3);
+      expect(new Set(runs.map((e) => e.metadata?.runId)).size).toBe(3);
+      expect(runs.every((e) => e.metadata?.sessionId === ledger.sessionId)).toBe(true);
+      expect(ledger.events.filter((e) => e.metadata?.kind === 'PROCESS_OUTCOME')).toHaveLength(3);
+    });
+
+    it('does not let the start promise overwrite callback signal details or record a second outcome', async () => {
+      const startSpy = vi.spyOn(PtyRunner.prototype, 'start').mockImplementation(async function (this: PtyRunner) {
+        (this as any).emitExit(7, 15);
+        return 9;
+      });
+
+      await runModule.runCommand(tempBaseDir, { dryRun: true, noTui: true });
+
+      const ledger = loadLedger(tempBaseDir);
+      const outcomes = ledger.events.filter((event) => event.metadata?.kind === 'PROCESS_OUTCOME');
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]?.metadata).toMatchObject({ outcomeKind: 'exit', exitCode: 7, signal: 15 });
+      expect(process.exitCode).toBe(7);
+      startSpy.mockRestore();
     });
 
     it('resets the ledger by default and starts in PLANNING before completion', async () => {
@@ -295,7 +350,7 @@ describe('CLI Parser', () => {
 
       expect(statusBeforeCompletion).toBe('PLANNING');
       const ledger = loadLedger(tempBaseDir);
-      expect(ledger.status).toBe('COMPLETED');
+      expect(ledger.status).toBe('IDLE');
       expect(ledger.checkpoints.spec.status).toBe('UNINITIALIZED');
 
       startSpy.mockRestore();
@@ -327,12 +382,21 @@ describe('CLI Parser', () => {
       startSpy.mockRestore();
     });
 
-    it('passes a session timestamp to the TUI mount', async () => {
-      const mountSpy = vi.spyOn(tuiModule, 'mountSupervisorTui').mockReturnValue({
-        unmount: vi.fn(),
-        waitUntilExit: vi.fn().mockResolvedValue(undefined),
-        store: {} as any,
-        virtualTerminal: {} as any,
+    it('passes one shared process context and session timestamp to the TUI mount', async () => {
+      const order: string[] = [];
+      const originalOnExit = PtyRunner.prototype.onExit;
+      const exitSpy = vi.spyOn(PtyRunner.prototype, 'onExit').mockImplementation(function (this: PtyRunner, callback: (code: number, signal?: number) => void) {
+        order.push('process-owner');
+        return originalOnExit.call(this, callback);
+      });
+      const mountSpy = vi.spyOn(tuiModule, 'mountSupervisorTui').mockImplementation(() => {
+        order.push('mount');
+        return {
+          unmount: vi.fn(),
+          waitUntilExit: vi.fn().mockResolvedValue(undefined),
+          store: {} as any,
+          virtualTerminal: {} as any,
+        };
       });
 
       await runModule.runCommand(tempBaseDir, {
@@ -343,9 +407,36 @@ describe('CLI Parser', () => {
       expect(mountSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           sessionStartedAt: expect.any(Number),
+          processRun: expect.objectContaining({ runId: expect.any(String), sessionId: expect.any(String) }),
+          processOutcomeOwner: 'caller',
         })
       );
+      expect(order.indexOf('process-owner')).toBeLessThan(order.indexOf('mount'));
 
+      mountSpy.mockRestore();
+      exitSpy.mockRestore();
+    });
+
+    it('prints the factual TUI outcome only after unmount restores the normal terminal', async () => {
+      let unmounted = false;
+      const output: string[] = [];
+      const mountSpy = vi.spyOn(tuiModule, 'mountSupervisorTui').mockReturnValue({
+        unmount: vi.fn(() => { unmounted = true; }),
+        waitUntilExit: vi.fn().mockResolvedValue(undefined),
+        store: {} as any,
+        virtualTerminal: {} as any,
+      });
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => {
+        const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
+        output.push(text);
+        if (text.includes('Agent process exited with code 0')) expect(unmounted).toBe(true);
+        return true;
+      });
+
+      await runModule.runCommand(tempBaseDir, { dryRun: true, forceTui: true });
+
+      expect(output.join('')).toContain('Agent process exited with code 0\nReview and verification not confirmed.');
+      stdoutSpy.mockRestore();
       mountSpy.mockRestore();
     });
 
@@ -355,7 +446,7 @@ describe('CLI Parser', () => {
         .spyOn(PtyRunner.prototype, 'start')
         .mockRejectedValue(new Error('Spawn failed simulate error'));
 
-      await runModule.runCommand(process.cwd(), {
+      await runModule.runCommand(tempBaseDir, {
         dryRun: true,
         agent: 'error-agent',
       });
@@ -365,14 +456,14 @@ describe('CLI Parser', () => {
       expect(errCall).toContain('Supervisor execution failed: Spawn failed simulate error');
       expect(process.exitCode).toBe(1);
 
-      const ledger = loadLedger(process.cwd());
+      const ledger = loadLedger(tempBaseDir);
       expect(ledger.status).toBe('FAILED');
       expect(ledger.activeAgent).toBeNull();
       expect(
         ledger.events.some(
           (e) =>
             e.level === 'ERROR' &&
-            e.message.includes('Supervisor execution failed: Spawn failed simulate error')
+            e.message.includes('Agent process failed to start: Spawn failed simulate error')
         )
       ).toBe(true);
 
@@ -380,8 +471,7 @@ describe('CLI Parser', () => {
       consoleErrorSpy.mockRestore();
     });
 
-    it('attaches signal handlers that reset ledger to IDLE and kill PTY', async () => {
-      const listenersBefore = process.listeners('SIGINT').length;
+    it('records a supervisor interruption once and kills the active PTY', async () => {
       let capturedSignalHandler: (() => void) | undefined;
 
       const onSpy = vi.spyOn(process, 'on').mockImplementation((event: string | symbol, listener: any) => {
@@ -391,25 +481,35 @@ describe('CLI Parser', () => {
         return process;
       });
 
-      // Start run command in dry-run mode
-      const runPromise = runModule.runCommand(process.cwd(), {
+      let resolveStart!: (code: number) => void;
+      const startSpy = vi.spyOn(PtyRunner.prototype, 'start').mockImplementation(() => new Promise((resolve) => {
+        resolveStart = resolve;
+      }));
+      const runPromise = runModule.runCommand(tempBaseDir, {
         dryRun: true,
         agent: 'signal-tester',
       });
 
       expect(capturedSignalHandler).toBeDefined();
 
-      // Trigger SIGINT handler
-      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as any);
+      const killSpy = vi.spyOn(PtyRunner.prototype, 'kill').mockImplementation(() => {});
       capturedSignalHandler!();
 
-      expect(exitSpy).toHaveBeenCalledWith(130);
-      const ledger = loadLedger(process.cwd());
+      expect(killSpy).toHaveBeenCalledWith('SIGINT');
+      const ledger = loadLedger(tempBaseDir);
       expect(ledger.status).toBe('IDLE');
+      expect(ledger.events.filter((event) => event.metadata?.kind === 'PROCESS_OUTCOME')).toHaveLength(1);
+      expect(ledger.events.find((event) => event.metadata?.kind === 'PROCESS_OUTCOME')?.metadata).toMatchObject({
+        outcomeKind: 'interrupted',
+        supervisorSignal: 'SIGINT',
+        supervisorExitCode: 130,
+      });
 
+      resolveStart(130);
       await runPromise;
       onSpy.mockRestore();
-      exitSpy.mockRestore();
+      startSpy.mockRestore();
+      killSpy.mockRestore();
     });
 
     it('mounts supervisor TUI when forceTui is enabled and unmounts on completion', async () => {
@@ -462,7 +562,7 @@ describe('CLI Parser', () => {
 
       expect(passthroughSpy).toHaveBeenCalledTimes(1);
       expect(detachSpy).toHaveBeenCalledTimes(1);
-      expect(setRawModeSpy).toHaveBeenCalledWith(false);
+      expect(setRawModeSpy).not.toHaveBeenCalled();
 
       startSpy.mockRestore();
       passthroughSpy.mockRestore();

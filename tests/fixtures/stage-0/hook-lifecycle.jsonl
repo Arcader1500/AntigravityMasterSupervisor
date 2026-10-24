@@ -1,0 +1,7 @@
+{"event":"PreInvocation","payload":{"conversationId":"<SESSION_1>","initialNumSteps":1,"invocationNum":0,"modelName":"claude-sonnet-5-5-medium","workspacePaths":["<TEMP_WORKSPACE>"]}}
+{"event":"PreToolUse","payload":{"conversationId":"<SESSION_1>","stepIdx":2,"modelName":"claude-sonnet-5-5-medium","toolCall":{"name":"write_file","args":{"Content":"LIFECYCLE_OK","Path":"<TEMP_WORKSPACE>\\hook-lifecycle-ok.txt"}},"workspacePaths":["<TEMP_WORKSPACE>"]}}
+{"event":"PostToolUse","payload":{"conversationId":"<SESSION_1>","stepIdx":2,"error":"","modelName":"claude-sonnet-5-5-medium","toolCall":{"name":"write_file","args":{"Content":"LIFECYCLE_OK","Path":"<TEMP_WORKSPACE>\\hook-lifecycle-ok.txt"}},"workspacePaths":["<TEMP_WORKSPACE>"]}}
+{"event":"PostInvocation","payload":{"conversationId":"<SESSION_1>","initialNumSteps":1,"invocationNum":0,"modelName":"claude-sonnet-5-5-medium","workspacePaths":["<TEMP_WORKSPACE>"]}}
+{"event":"PreInvocation","payload":{"conversationId":"<SESSION_1>","initialNumSteps":3,"invocationNum":1,"modelName":"claude-sonnet-5-5-medium","workspacePaths":["<TEMP_WORKSPACE>"]}}
+{"event":"PostInvocation","payload":{"conversationId":"<SESSION_1>","initialNumSteps":3,"invocationNum":1,"modelName":"claude-sonnet-5-5-medium","workspacePaths":["<TEMP_WORKSPACE>"]}}
+{"event":"Stop","payload":{"conversationId":"<SESSION_1>","executionNum":0,"fullyIdle":true,"modelName":"claude-sonnet-5-5-medium","terminationReason":"NO_TOOL_CALL","workspacePaths":["<TEMP_WORKSPACE>"]}}

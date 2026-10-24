@@ -47,7 +47,7 @@ describe('HeaderBar conversational component', () => {
     const frame = lastFrame() ?? '';
     expect(frame).toContain('agysup');
     expect(frame).toContain('feat/rate-limit');
-    expect(frame).toContain('Spec ✓  Plan ✓  Build ▸ wave 2 of 3  Verify');
+    expect(frame).toContain('Spec recorded  Plan recorded  Build  Verify  (recorded ledger)');
     expect(frame).toContain('06:42');
   });
 
@@ -81,7 +81,7 @@ describe('HeaderBar conversational component', () => {
     expect(frame).toContain('Team / orchestrator');
   });
 
-  it('renders Done when status is COMPLETED', () => {
+  it('renders legacy COMPLETED without claiming verified done', () => {
     const { lastFrame } = render(
       <HeaderBar
         branch="feat/rate-limit"
@@ -91,8 +91,11 @@ describe('HeaderBar conversational component', () => {
       />
     );
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Done');
-    expect(frame).not.toContain('Build');
+    expect(frame).toContain('Legacy ledger status COMPLETED');
+    expect(frame).toContain('Source: recorded ledger.');
+    expect(frame).toContain('unconfirmed');
+    expect(frame).not.toContain('Done');
+    expect(frame).not.toContain('Verify ✓');
   });
 
   it('renders 1 needs you badge when pendingDecisionCount is 1 in color and monochrome', () => {
@@ -161,8 +164,16 @@ describe('HeaderBar conversational component', () => {
       />
     );
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Spec ▸');
-    expect(frame).not.toContain('Build ▸');
+    expect(frame).toContain('Build ▸');
+  });
+
+  it('attributes an artifact-inferred execution phase to artifacts', () => {
+    const { lastFrame } = render(
+      <HeaderBar status="EXECUTING" phaseSource="artifacts" specApproved={false} planApproved={false} />
+    );
+    const frame = (lastFrame() ?? '').replace(/\s+/g, ' ');
+    expect(frame).toMatch(/Build [>▸] \(phase inferred from artifacts\)/);
+    expect(frame).not.toContain('(recorded ledger)');
   });
 
   it('preserves legacy HeaderBar output when only legacy props are passed', () => {
@@ -182,13 +193,22 @@ describe('HeaderBar conversational component', () => {
     expect(frame).toContain('NAV');
     expect(frame).toContain('WAITING FOR INPUT');
   });
+
+  it('keeps compatibility HeaderBar COMPLETED neutral', () => {
+    const { lastFrame } = render(<HeaderBar status="COMPLETED" inputMode="NAVIGATION" />);
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('COMPLETED (legacy,');
+    expect(frame).toContain('unverified)');
+    expect(frame).not.toContain('Done');
+  });
 });
 
 describe('FooterBar conversational component', () => {
   it('renders default CHAT hints with zero tab pills', () => {
     const { lastFrame } = render(<FooterBar mode="CHAT" />);
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Tab team   Enter open agent   / commands   Ctrl+T take over the terminal');
+    expect(frame).toContain('Tab team   Enter open agent   /pause queues input');
+    expect(frame).toContain('attempts a POSIX child signal');
     expect(frame).not.toContain('[1]');
     expect(frame).not.toContain('[2]');
     expect(frame).not.toContain('[3]');
@@ -198,8 +218,19 @@ describe('FooterBar conversational component', () => {
   it('renders CHAT hints when paused with /resume leading hint', () => {
     const { lastFrame } = render(<FooterBar mode="CHAT" isPaused={true} />);
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('/resume   Tab team   Enter open agent   / commands   Ctrl+T take over the terminal');
+    expect(frame).toContain('Paused: signal status unavailable; input is queued.');
+    expect(frame).toContain('/resume');
     expect(frame).not.toContain('[1]');
+  });
+
+  it.each([
+    ['windows_input_only', 'Paused: Windows queues input'],
+    ['pause_signal_failed', 'Paused: POSIX child signal failed'],
+    ['pause_signal_unavailable', 'Paused: POSIX child signal unavailable'],
+    ['pause_signal_sent_unconfirmed', 'Paused: POSIX child signal attempted'],
+  ] as const)('reports pause feedback %s accurately', (pauseFeedback, expected) => {
+    const { lastFrame } = render(<FooterBar mode="CHAT" isPaused pauseFeedback={pauseFeedback} />);
+    expect(lastFrame() ?? '').toContain(expected);
   });
 
   it('renders decision prompt hints when hasFocusedDecision is true', () => {
@@ -272,7 +303,9 @@ describe('FooterBar conversational component', () => {
       <FooterBar activePanel={1} inputMode="NAVIGATION" />
     );
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('[1] Main Status');
-    expect(frame).toContain('[2] Live PTY');
+    expect(frame).toContain('[1] Main');
+    expect(frame).toContain('Status');
+    expect(frame).toContain('[2] Live');
+    expect(frame).toContain('PTY');
   });
 });

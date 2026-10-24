@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { TelemetrySnapshot, PlanTaskItem } from '../../telemetry/types.js';
+import type { TelemetrySnapshot, PlanTaskItem, ObservationSource } from '../../telemetry/types.js';
 import { resolveTheme, type ThemeConfig } from '../theme.js';
 import { resolveGlyphs, type GlyphSet } from '../glyphs.js';
 
@@ -9,7 +9,7 @@ export interface TeamMemberRow {
   role: string;
   isMain: boolean;
   taskNumber?: number;
-  statusText: string; // 'running' | 'waiting' | 'idle' | 'approved' | 'after Task N' | 'paused' | 'paused, needs you'
+  statusText: string; // observed activity, recorded progress, or input-needed state
   elapsedFormatted?: string;
   needsYou: boolean;
 }
@@ -22,6 +22,7 @@ export interface TeamRailProps {
   isFocused?: boolean;
   zoomTask?: PlanTaskItem | null;
   handledCounts?: { promptsApproved: number; questionsAnswered?: number; planFixes?: number };
+  progressSource?: ObservationSource;
   width?: number;
   theme?: ThemeConfig;
   glyphs?: GlyphSet;
@@ -49,6 +50,7 @@ export function deriveTeamMembers(
   ledgerStatus?: string
 ): TeamMemberRow[] {
   const tasks = snapshot.tasks ?? (snapshot as any).planTasks ?? [];
+  const processEnded = Boolean(snapshot.processOutcome) || ledgerStatus === 'COMPLETED' || ledgerStatus === 'FAILED';
 
   const rawActive = (snapshot as any).activeAgent ?? snapshot.activeSubagent ?? null;
   const activeRole = typeof rawActive === 'string' ? rawActive.toLowerCase() : null;
@@ -103,6 +105,10 @@ export function deriveTeamMembers(
         }
       } else if (id === 'planner' && activeId !== 'planner') {
         statusText = 'waiting';
+      }
+      if (processEnded && (statusText === 'running' || statusText === 'paused' || needsYou)) {
+        statusText = 'ended';
+        needsYou = false;
       }
 
       return {
@@ -184,7 +190,7 @@ export function deriveTeamMembers(
       } else if (id === 'code-reviewer') {
         if (lastCompletedNum !== undefined) {
           taskNumber = lastCompletedNum;
-          statusText = 'approved';
+          statusText = 'waiting';
         } else {
           statusText = 'waiting';
         }
@@ -195,6 +201,10 @@ export function deriveTeamMembers(
           statusText = 'waiting';
         }
       }
+    }
+    if (processEnded && (statusText === 'running' || statusText === 'paused' || needsYou)) {
+      statusText = 'ended';
+      needsYou = false;
     }
 
     return {
@@ -217,17 +227,26 @@ export const TeamRail: React.FC<TeamRailProps> = ({
   isFocused = false,
   zoomTask,
   handledCounts,
+  progressSource,
   width = 32,
   theme,
   glyphs,
 }) => {
   const activeTheme = theme ?? resolveTheme();
   const activeGlyphs = glyphs ?? resolveGlyphs();
+  const progressSourceLabel = progressSource === 'agent_output'
+    ? 'agent output'
+    : progressSource === 'artifacts'
+      ? 'artifacts'
+      : progressSource === 'ledger'
+        ? 'recorded ledger'
+        : undefined;
+  const processEnded = members.some((member) => member.statusText === 'ended');
 
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={width} flexShrink={0}>
       {/* Block 1: Team tree */}
-      <Box flexDirection="column" width={width}>
+      <Box flexDirection="column" width={width} flexShrink={0}>
         <Text color={activeTheme.colors.text}>Team</Text>
         {members.map((row, idx) => {
           const isSelected = Boolean(isFocused && selectedMemberIndex === idx);
@@ -253,7 +272,7 @@ export const TeamRail: React.FC<TeamRailProps> = ({
           } else if (row.statusText === 'running' && row.elapsedFormatted) {
             statusPart = row.elapsedFormatted;
           } else {
-            statusPart = row.statusText;
+            statusPart = row.statusText === 'approved' ? 'recorded' : row.statusText;
           }
 
           const statusColor =
@@ -274,7 +293,7 @@ export const TeamRail: React.FC<TeamRailProps> = ({
           );
 
           return (
-            <Box key={row.id || idx} flexDirection="row" width={width}>
+            <Box key={row.id || idx} flexDirection="row" width={width} flexShrink={0}>
               <Text inverse={isSelected}>
                 <Text color={activeTheme.colors.text}>{leftText}</Text>
                 <Text>{' '.repeat(padSpaces)}</Text>
@@ -290,7 +309,7 @@ export const TeamRail: React.FC<TeamRailProps> = ({
 
       {/* Block 2: Tasks or Zoom Checklist */}
       {zoomTask ? (
-        <Box marginTop={1} flexDirection="column" width={width}>
+        <Box marginTop={1} flexDirection="column" width={width} flexShrink={0}>
           <Text color={activeTheme.colors.text}>
             {`Task ${zoomTask.index ?? 1} checklist from the plan`}
           </Text>
@@ -336,7 +355,7 @@ export const TeamRail: React.FC<TeamRailProps> = ({
                 }
 
                 return (
-                  <Box key={cIdx} flexDirection="row" width={width}>
+                  <Box key={cIdx} flexDirection="row" width={width} flexShrink={0}>
                     <Text color={iconColor}>{prefixStr}</Text>
                     <Text color={textColor}>{displayText}</Text>
                   </Box>
@@ -346,15 +365,18 @@ export const TeamRail: React.FC<TeamRailProps> = ({
           ) : null}
         </Box>
       ) : tasks.length === 0 && ledgerStatus !== 'COMPLETED' ? (
-        <Box marginTop={1} flexDirection="column" width={width}>
-          <Text color={activeTheme.colors.text}>Tasks</Text>
+        <Box marginTop={1} flexDirection="column" width={width} flexShrink={0}>
+          <Text color={activeTheme.colors.text}>{`Tasks · ${progressSourceLabel ?? 'source unavailable'}`}</Text>
           <Text color={activeTheme.colors.dim}>
-            Tasks appear once the plan is approved.
+            Recorded task progress appears here when available.
           </Text>
         </Box>
       ) : (
-        <Box marginTop={1} flexDirection="column" width={width}>
-          <Text color={activeTheme.colors.text}>Tasks</Text>
+        <Box marginTop={1} flexDirection="column" width={width} flexShrink={0}>
+          <Text color={activeTheme.colors.text}>
+            {`Tasks${progressSourceLabel ? ` · ${progressSourceLabel}` : ''}${processEnded ? '; process ended' : ''}`}
+          </Text>
+          {ledgerStatus === 'COMPLETED' ? <Text color={activeTheme.colors.dim}>Legacy ledger status COMPLETED; review and verification are unconfirmed.</Text> : null}
           {tasks.map((task, tIdx) => {
             const taskNum = task.index ?? tIdx + 1;
             let icon = '';
@@ -362,17 +384,23 @@ export const TeamRail: React.FC<TeamRailProps> = ({
             let textColor = activeTheme.colors.dim;
 
             if (task.status === 'completed') {
-              icon = activeGlyphs.done;
-              iconColor = activeTheme.colors.done;
+              icon = '·';
+              iconColor = activeTheme.colors.dim;
               textColor = activeTheme.colors.text;
             } else if (task.status === 'in_progress') {
-              const padLen = Math.max(
-                0,
-                activeGlyphs.done.length - activeGlyphs.running.length
-              );
-              icon = `${activeGlyphs.running}${' '.repeat(padLen)}`;
-              iconColor = activeTheme.colors.active;
-              textColor = activeTheme.colors.text;
+              if (processEnded) {
+                icon = '~';
+                iconColor = activeTheme.colors.dim;
+                textColor = activeTheme.colors.dim;
+              } else {
+                const padLen = Math.max(
+                  0,
+                  activeGlyphs.done.length - activeGlyphs.running.length
+                );
+                icon = `${activeGlyphs.running}${' '.repeat(padLen)}`;
+                iconColor = activeTheme.colors.active;
+                textColor = activeTheme.colors.text;
+              }
             } else {
               icon = ' '.repeat(activeGlyphs.done.length);
             }
@@ -381,7 +409,10 @@ export const TeamRail: React.FC<TeamRailProps> = ({
             const isAscii =
               activeGlyphs.running === '>' || activeGlyphs.done === '[x]';
             const ellipsis = isAscii ? '...' : '…';
-            const maxTitleLen = width - prefixStr.length;
+            const statusSuffix = processEnded && task.status === 'in_progress' && width > prefixStr.length + 15
+              ? ' (in progress)'
+              : '';
+            const maxTitleLen = width - prefixStr.length - statusSuffix.length;
             let displayTitle = task.title;
             if (displayTitle.length > maxTitleLen) {
               displayTitle =
@@ -392,9 +423,9 @@ export const TeamRail: React.FC<TeamRailProps> = ({
             }
 
             return (
-              <Box key={task.id || tIdx} flexDirection="row" width={width}>
+              <Box key={task.id || tIdx} flexDirection="row" width={width} flexShrink={0}>
                 <Text color={iconColor}>{prefixStr}</Text>
-                <Text color={textColor}>{displayTitle}</Text>
+                <Text color={textColor}>{displayTitle}{statusSuffix}</Text>
               </Box>
             );
           })}
@@ -403,7 +434,7 @@ export const TeamRail: React.FC<TeamRailProps> = ({
 
       {/* Block 3: Handled for you */}
       {handledCounts && handledCounts.promptsApproved > 0 ? (
-        <Box marginTop={1} flexDirection="column" width={width}>
+        <Box marginTop={1} flexDirection="column" width={width} flexShrink={0}>
           <Text color={activeTheme.colors.text}>Handled for you</Text>
           <Text color={activeTheme.colors.dim}>
             {`${handledCounts.promptsApproved} permission prompts approved`}

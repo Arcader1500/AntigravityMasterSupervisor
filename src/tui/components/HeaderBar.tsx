@@ -1,8 +1,10 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { InputMode } from '../../telemetry/types.js';
+import type { InputMode, ObservationSource } from '../../telemetry/types.js';
 import { resolveTheme, type ThemeConfig } from '../theme.js';
 import { resolveGlyphs, type GlyphSet } from '../glyphs.js';
+import type { ProcessPresentation } from '../process-presentation.js';
+import type { PauseFeedback } from '../transcript-store.js';
 
 export function formatDuration(ms: number): string {
   if (ms <= 0 || !Number.isFinite(ms)) return '00m 00s';
@@ -48,6 +50,9 @@ export interface HeaderBarProps {
   zoomTarget?: { role: string; taskNumber?: number } | null;
   theme?: ThemeConfig;
   glyphs?: GlyphSet;
+  processPresentation?: ProcessPresentation;
+  pauseFeedback?: PauseFeedback;
+  phaseSource?: ObservationSource;
 
   // Legacy props
   inputMode?: InputMode;
@@ -69,6 +74,9 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   zoomTarget,
   theme,
   glyphs,
+  processPresentation,
+  pauseFeedback,
+  phaseSource,
   inputMode,
   waitingForInput,
 }) => {
@@ -113,7 +121,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             </Text>
             <Text color="gray"> │ </Text>
             <Text>
-              Status: <Text bold color="green">{status ?? ''}</Text>
+              Status: <Text bold color={status === 'COMPLETED' ? 'yellow' : 'green'}>{status === 'COMPLETED' ? 'COMPLETED (legacy, unverified)' : status ?? ''}</Text>
             </Text>
           </Text>
         </Box>
@@ -135,32 +143,22 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   const activeTheme = theme ?? resolveTheme();
   const activeGlyphs = glyphs ?? resolveGlyphs();
 
-  // Phase flags are mutually exclusive: exactly one of done/current can be true across Spec→Plan→Build→Verify.
-  const verifyDone = status === 'COMPLETED';
+  // The ledger describes a phase; it does not certify a completed stage.
   const verifyCurrent = status === 'VERIFYING';
-
-  const buildDone = status === 'COMPLETED' || status === 'VERIFYING';
-  const buildCurrent =
-    !verifyCurrent &&
-    !verifyDone &&
-    (Boolean(specApproved && planApproved) ||
-      (status === 'EXECUTING' && (totalTasks ?? 0) > 0));
-
-  const planDone = Boolean(planApproved) || buildCurrent || buildDone;
-  const planCurrent =
-    !buildCurrent &&
-    !buildDone &&
-    !verifyCurrent &&
-    !verifyDone &&
-    Boolean(specApproved && !planApproved);
-
-  const specDone = Boolean(specApproved) || planDone;
-  const specCurrent =
-    !specDone &&
-    !planCurrent &&
-    !buildCurrent &&
-    !verifyCurrent &&
-    status !== 'COMPLETED';
+  const buildCurrent = status === 'EXECUTING';
+  const specCurrent = status === 'CHECKPOINT_SPEC' || (status === 'PLANNING' && !specApproved);
+  const planCurrent = status === 'PLANNING' && Boolean(specApproved) && !planApproved;
+  const specDone = Boolean(specApproved);
+  const planDone = Boolean(planApproved);
+  const buildDone = false;
+  const verifyDone = false;
+  const inferredPhaseSource = phaseSource === 'artifacts'
+    ? 'phase inferred from artifacts'
+    : phaseSource === 'agent_output'
+      ? 'phase inferred from agent output'
+      : phaseSource === 'ledger'
+        ? 'phase recorded in ledger'
+        : undefined;
 
   let waveOrTaskText = '';
   if (currentWave !== undefined && totalWaves !== undefined) {
@@ -172,16 +170,17 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   const renderPhaseStrip = () => (
     <Text>
       <Text color={specDone || specCurrent ? activeTheme.colors.text : activeTheme.colors.dim}>Spec</Text>
-      {specDone && <Text color={activeTheme.colors.done}>{` ${activeGlyphs.done}`}</Text>}
+      {specDone && <Text color={activeTheme.colors.dim}> recorded</Text>}
       {specCurrent && <Text color={activeTheme.colors.active}>{` ${activeGlyphs.running}`}</Text>}
       <Text>  </Text>
       <Text color={planDone || planCurrent ? activeTheme.colors.text : activeTheme.colors.dim}>Plan</Text>
-      {planDone && <Text color={activeTheme.colors.done}>{` ${activeGlyphs.done}`}</Text>}
+      {planDone && <Text color={activeTheme.colors.dim}> recorded</Text>}
       {planCurrent && <Text color={activeTheme.colors.active}>{` ${activeGlyphs.running}`}</Text>}
       <Text>  </Text>
       <Text color={buildDone || buildCurrent ? activeTheme.colors.text : activeTheme.colors.dim}>Build</Text>
       {buildDone && <Text color={activeTheme.colors.done}>{` ${activeGlyphs.done}`}</Text>}
       {buildCurrent && <Text color={activeTheme.colors.active}>{` ${activeGlyphs.running}`}</Text>}
+      {buildCurrent && inferredPhaseSource && <Text color={activeTheme.colors.dim}>{` (${inferredPhaseSource})`}</Text>}
       {buildCurrent && waveOrTaskText ? (
         <Text color={activeTheme.colors.dim}>{` ${waveOrTaskText}`}</Text>
       ) : null}
@@ -189,6 +188,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
       <Text color={verifyDone || verifyCurrent ? activeTheme.colors.text : activeTheme.colors.dim}>Verify</Text>
       {verifyDone && <Text color={activeTheme.colors.done}>{` ${activeGlyphs.done}`}</Text>}
       {verifyCurrent && <Text color={activeTheme.colors.active}>{` ${activeGlyphs.running}`}</Text>}
+      {(specDone || planDone) && <Text color={activeTheme.colors.dim}>  (recorded ledger)</Text>}
     </Text>
   );
 
@@ -207,12 +207,14 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             {`Team / ${zoomTarget.role}${zoomTarget.taskNumber !== undefined ? `, Task ${zoomTarget.taskNumber}` : ''}`}
           </Text>
         ) : status === 'COMPLETED' ? (
-          <Text color={activeTheme.colors.done}>Done</Text>
+          <Text color={activeTheme.colors.ask}>
+            {processPresentation?.outcomeText ?? 'Legacy ledger status COMPLETED'}; {processPresentation?.sourceText ?? 'Source: recorded ledger.'} review and verification unconfirmed
+          </Text>
         ) : (
           renderPhaseStrip()
         )}
         {isPaused && (
-          <Text color={activeTheme.colors.ask}>Paused</Text>
+          <Text color={activeTheme.colors.ask}>{pauseFeedback === 'windows_input_only' ? 'Paused; Windows queues input' : pauseFeedback?.startsWith('pause_signal_failed') ? 'Paused; POSIX signal failed' : pauseFeedback?.startsWith('pause_signal_sent') ? 'Paused; POSIX signal attempted' : 'Paused'}</Text>
         )}
         {pendingDecisionCount && pendingDecisionCount > 0 ? (
           <Text

@@ -1,4 +1,6 @@
 import type { PlanTaskItem, TelemetryEvent } from '../telemetry/types.js';
+import type { ProcessOutcome } from '../core/types.js';
+import { formatProcessOutcome } from '../core/process-outcome.js';
 import {
   FIRST_LAUNCH_NOTE,
   CONTEXT_RESET_NOTE,
@@ -44,6 +46,8 @@ export type TranscriptItem =
       testSummaryText?: string;
       nextStepText?: string;
       commitSha?: string;
+      reportedVerdict?: string;
+      reportSource?: 'agent_output' | 'artifacts' | 'ledger';
       timestamp: string;
     }
   | {
@@ -64,6 +68,9 @@ export type TranscriptItem =
       options: Array<{ index: number; label: string; recommended?: boolean }>;
       status: 'pending' | 'deferred' | 'answered';
       selectedOptionIndex: number; // 1-based default 1 when composer empty
+      revision?: number;
+      delivery?: 'pending' | 'queued' | 'written' | 'error';
+      deliveryError?: string;
       answeredText?: string;
       timestamp: string;
     }
@@ -87,6 +94,10 @@ export type TranscriptItem =
       options: Array<{ index: number; label: string; action: 'retry' | 'skip' | 'takeover' | 'quit' }>;
       status: 'pending' | 'deferred' | 'resolved';
       selectedOptionIndex: number;
+      revision?: number;
+      delivery?: 'pending' | 'queued' | 'written' | 'error';
+      deliveryError?: string;
+      reportSource?: 'agent_output' | 'artifacts' | 'ledger';
       resolvedText?: string;
       timestamp: string;
     }
@@ -118,10 +129,12 @@ export type NarratorInputEvent =
   | { type: 'NEW_COMMIT'; sha: string; subject: string; timestamp: string }
   | { type: 'LEDGER_STATUS_CHANGED'; status: string; prevStatus: string; branchName?: string; totalElapsedFormatted?: string; timestamp: string }
   | { type: 'PTY_EXITED'; exitCode: number; lastErrorLine?: string | null; timestamp: string }
+  | { type: 'PROCESS_OUTCOME'; outcome: ProcessOutcome }
   | { type: 'DECISION_SELECTION_CHANGED'; id: string; selectedOptionIndex: number }
   | { type: 'DECISION_DEFERRED'; id: string }
   | { type: 'DECISION_REFOCUSED' }
   | { type: 'DECISION_ANSWERED'; id: string; answerText: string }
+  | { type: 'DECISION_DELIVERY_UPDATED'; id: string; delivery: 'pending' | 'queued' | 'written' | 'error'; deliveryError?: string }
   | { type: 'QUIET_COUNT_UPDATED'; promptsApproved: number; questionsAnswered?: number; planFixes?: number }
   | { type: 'APPEND_SUPERVISOR_NOTE'; text: string; timestamp: string }
   | { type: 'TICK_ELAPSED'; elapsedFormatted: string };
@@ -164,6 +177,21 @@ function repositionQuietCounter(items: TranscriptItem[]): TranscriptItem[] {
   }
 
   return [...withoutQuiet, quietItem];
+}
+
+function sameDecisionOptions(
+  left: Array<{ index: number; label: string; recommended?: boolean }>,
+  right: Array<{ index: number; label: string; recommended?: boolean }>
+): boolean {
+  return left.length === right.length && left.every((option, index) =>
+    option.index === right[index].index && option.label === right[index].label && option.recommended === right[index].recommended
+  );
+}
+
+function observationSourceLabel(source?: 'agent_output' | 'artifacts' | 'ledger'): string {
+  if (source === 'artifacts') return 'artifacts';
+  if (source === 'ledger') return 'recorded ledger';
+  return 'agent output';
 }
 
 function getWaveCount(tasks: PlanTaskItem[]): number | undefined {
@@ -351,7 +379,8 @@ function reduceTelemetryEvent(
           testSummaryText: formatTestSummarySentence(
             card.role,
             event.testSummary.passed,
-            event.testSummary.failed
+            event.testSummary.failed,
+            event.source
           ),
           elapsedFormatted,
         };
@@ -375,7 +404,7 @@ function reduceTelemetryEvent(
         const card = items[targetIndex] as Extract<TranscriptItem, { kind: 'DelegationCard' }>;
         items[targetIndex] = {
           ...card,
-          testSummaryText: formatTestSummarySentence(card.role, event.passed, event.failed),
+          testSummaryText: formatTestSummarySentence(card.role, event.passed, event.failed, event.source),
           elapsedFormatted,
         };
       }
@@ -402,15 +431,28 @@ function reduceTelemetryEvent(
       if (
         event.verdict === 'DONE' ||
         event.verdict === 'APPROVE' ||
-        event.verdict === 'PASS'
+        event.verdict === 'PASS' ||
+        event.verdict === 'READY'
       ) {
         if (targetIndex !== -1) {
           const card = items[targetIndex] as Extract<TranscriptItem, { kind: 'DelegationCard' }>;
           items[targetIndex] = {
             ...card,
             status: 'completed',
+            reportedVerdict: event.verdict,
+            reportSource: event.source ?? 'agent_output',
+            nextStepText: event.verdict === 'APPROVE'
+              ? 'Spec approval and execution handoff are unconfirmed.'
+              : 'Independent review and verification are unconfirmed.',
             elapsedFormatted,
           };
+        } else {
+          items.push({
+            id: `report-${event.role}-${event.timestamp}`,
+            kind: 'SupervisorNote',
+            text: `${event.role} reported ${event.verdict} from ${observationSourceLabel(event.source)}; approval, handoff, review, and verification are unconfirmed.`,
+            timestamp: event.timestamp,
+          });
         }
         return { ...state, items: repositionQuietCounter(items) };
       }
@@ -421,7 +463,9 @@ function reduceTelemetryEvent(
           items[targetIndex] = {
             ...card,
             status: 'completed_with_concerns',
-            nextStepText: 'Finished with concerns. Reviewer will check.',
+            reportedVerdict: event.verdict,
+            reportSource: event.source ?? 'agent_output',
+            nextStepText: 'Independent review and verification are unconfirmed.',
             elapsedFormatted,
           };
         }
@@ -441,7 +485,12 @@ function reduceTelemetryEvent(
 
         const taskNumber =
           card?.taskNumber ?? (state.activeTaskNumber > 0 ? state.activeTaskNumber : undefined);
-        const cardId = card?.id ?? `failure-${event.timestamp}`;
+        const existingFailureIndex = items.findIndex((item) => item.kind === 'FailureCard' && item.status !== 'resolved' &&
+          item.role.toLowerCase() === event.role.toLowerCase() && item.taskNumber === taskNumber);
+        const existingFailure = existingFailureIndex >= 0
+          ? items[existingFailureIndex] as Extract<TranscriptItem, { kind: 'FailureCard' }>
+          : undefined;
+        const cardId = card?.id ?? existingFailure?.id ?? `failure-${event.timestamp}`;
 
         let failureKind: 'blocked' | 'needs_context' | 'verify_failed' = 'blocked';
         if (event.verdict === 'NEEDS_CONTEXT') {
@@ -479,10 +528,17 @@ function reduceTelemetryEvent(
           ],
           status: 'pending',
           selectedOptionIndex: 1,
+          revision: existingFailure
+            ? (existingFailure.revision ?? 0) + (existingFailure.headline !== headline || existingFailure.reason !== reason || existingFailure.failureKind !== failureKind ? 1 : 0)
+            : 0,
+          delivery: existingFailure?.delivery ?? 'pending',
+          reportSource: event.source ?? 'agent_output',
           timestamp: event.timestamp,
         };
 
-        if (targetIndex !== -1) {
+        if (existingFailureIndex !== -1) {
+          items[existingFailureIndex] = failureCard;
+        } else if (targetIndex !== -1) {
           items[targetIndex] = failureCard;
         } else {
           items.push(failureCard);
@@ -491,7 +547,7 @@ function reduceTelemetryEvent(
         return {
           ...state,
           items: repositionQuietCounter(items),
-          pendingDecisionCount: state.pendingDecisionCount + 1,
+          pendingDecisionCount: existingFailure ? state.pendingDecisionCount : state.pendingDecisionCount + 1,
           latestBellDecisionId: cardId,
         };
       }
@@ -507,11 +563,17 @@ function reduceTelemetryEvent(
 
       if (existingIndex !== -1) {
         const existing = items[existingIndex] as Extract<TranscriptItem, { kind: 'DecisionCard' }>;
+        const headline = event.headline || existing.headline;
+        const contextLine = event.contextLine ?? existing.contextLine;
+        const changed = existing.promptKind !== event.promptKind || existing.headline !== headline ||
+          existing.contextLine !== contextLine || !sameDecisionOptions(existing.options, event.options);
         items[existingIndex] = {
           ...existing,
-          headline: event.headline || existing.headline,
-          contextLine: event.contextLine ?? existing.contextLine,
+          promptKind: event.promptKind,
+          headline,
+          contextLine,
           options: event.options,
+          revision: (existing.revision ?? 0) + (changed ? 1 : 0),
           timestamp: event.timestamp,
         };
         return {
@@ -532,6 +594,8 @@ function reduceTelemetryEvent(
         options: event.options,
         status: 'pending',
         selectedOptionIndex: 1,
+        revision: 0,
+        delivery: 'pending',
         timestamp: event.timestamp,
       };
 
@@ -667,24 +731,7 @@ export function reduceNarrator(state: NarratorState, event: NarratorInputEvent):
       }
 
       if (event.status === 'COMPLETED') {
-        items = items.map((item) => {
-          if (item.kind === 'DelegationCard' && (item.status === 'running' || item.status === 'paused')) {
-            return { ...item, status: 'completed' };
-          }
-          return item;
-        });
-
-        const commitCount = items.filter((i) => i.kind === 'CommitLine').length;
-        items.push({
-          id: `completion-${event.timestamp}`,
-          kind: 'CompletionCard',
-          branchName: event.branchName || '',
-          taskCount: state.tasks.length,
-          commitCount,
-          verifierResult: 'All checks passed',
-          totalElapsedFormatted: event.totalElapsedFormatted || '0s',
-          timestamp: event.timestamp,
-        });
+        // Legacy status remains visible in the PhaseChange without certifying delivery.
       }
 
       return {
@@ -695,39 +742,16 @@ export function reduceNarrator(state: NarratorState, event: NarratorInputEvent):
     }
 
     case 'PTY_EXITED': {
-      if (event.exitCode === 0) {
-        return state;
-      }
-
-      const ptyFailureId = `pty-exit-${event.timestamp}`;
-      const reason =
-        event.lastErrorLine && event.lastErrorLine.trim()
-          ? event.lastErrorLine.trim()
-          : `The process exited unexpectedly with code ${event.exitCode}.`;
-
-      const failureCard: TranscriptItem = {
-        id: ptyFailureId,
-        kind: 'FailureCard',
-        taskNumber: state.activeTaskNumber > 0 ? state.activeTaskNumber : undefined,
-        role: 'orchestrator',
-        headline: `Process exited with code ${event.exitCode}`,
-        reason,
-        failureKind: 'pty_exit',
-        options: [
-          { index: 1, label: 'Retry the task', action: 'retry' },
-          { index: 2, label: 'Take over the terminal', action: 'takeover' },
-          { index: 3, label: 'Quit', action: 'quit' },
-        ],
-        status: 'pending',
-        selectedOptionIndex: 1,
-        timestamp: event.timestamp,
-      };
-
+      const error = event.lastErrorLine?.trim();
+      const text = `${error ? `Last error line reported: ${error}. ` : ''}Agent process exited with code ${event.exitCode}; review and verification are unconfirmed.`;
       return {
         ...state,
-        items: repositionQuietCounter([...state.items, failureCard]),
-        pendingDecisionCount: state.pendingDecisionCount + 1,
-        latestBellDecisionId: ptyFailureId,
+        items: repositionQuietCounter([...state.items, {
+          id: `pty-exit-${event.timestamp}`,
+          kind: 'SupervisorNote',
+          text,
+          timestamp: event.timestamp,
+        }]),
       };
     }
 
@@ -741,6 +765,25 @@ export function reduceNarrator(state: NarratorState, event: NarratorInputEvent):
         return item;
       });
       return { ...state, items };
+    }
+
+    case 'DECISION_DELIVERY_UPDATED': {
+      const items = state.items.map((item) => item.id === event.id && (item.kind === 'DecisionCard' || item.kind === 'FailureCard')
+        ? { ...item, delivery: event.delivery, deliveryError: event.deliveryError }
+        : item);
+      return { ...state, items };
+    }
+
+    case 'PROCESS_OUTCOME': {
+      const id = `process-outcome-${event.outcome.runId}`;
+      if (state.items.some((item) => item.id === id)) return state;
+      const note: TranscriptItem = {
+        id,
+        kind: 'SupervisorNote',
+        text: formatProcessOutcome(event.outcome),
+        timestamp: event.outcome.observedAt,
+      };
+      return { ...state, items: repositionQuietCounter([...state.items, note]) };
     }
 
     case 'DECISION_DEFERRED': {

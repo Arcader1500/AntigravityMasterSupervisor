@@ -11,12 +11,14 @@ import { loadLedger } from '../../src/core/ledger.js';
 
 describe('TUI & Telemetry Live PTY Integration', () => {
   let tmpDir: string;
+  const originalExitCode = process.exitCode;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-tui-run-'));
   });
 
   afterEach(() => {
+    process.exitCode = originalExitCode;
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch {
@@ -32,9 +34,38 @@ describe('TUI & Telemetry Live PTY Integration', () => {
     });
 
     const ledger = loadLedger(tmpDir);
-    expect(ledger.status).toBe('COMPLETED');
+    expect(ledger.status).toBe('IDLE');
     expect(ledger.events.some((e) => e.message.includes('Supervisor execution started'))).toBe(true);
-    expect(ledger.events.some((e) => e.message.includes('ended with exit code 0'))).toBe(true);
+    expect(ledger.events.filter((e) => e.metadata?.kind === 'PROCESS_STARTED')).toHaveLength(1);
+    expect(ledger.events.filter((e) => e.metadata?.kind === 'PROCESS_OUTCOME')).toHaveLength(1);
+    expect(ledger.events.find((e) => e.metadata?.kind === 'PROCESS_OUTCOME')?.metadata).toMatchObject({ outcomeKind: 'exit', exitCode: 0 });
+  });
+
+  it('persists real Node PTY exit 7 and propagates its CLI exit code', async () => {
+    await runCommand(tmpDir, { agyBin: process.execPath, noTui: true, args: ['-e', 'process.exit(7)'] });
+    const ledger = loadLedger(tmpDir);
+    expect(ledger.status).toBe('FAILED');
+    expect(process.exitCode).toBe(7);
+    expect(ledger.events.find((e) => e.metadata?.kind === 'PROCESS_OUTCOME')?.metadata).toMatchObject({ outcomeKind: 'exit', exitCode: 7 });
+  });
+
+  it('does not infer success from a PASS line before a zero-exit child', async () => {
+    await runCommand(tmpDir, { agyBin: process.execPath, noTui: true, args: ['-e', 'console.log("PASS"); process.exit(0)'] });
+    const ledger = loadLedger(tmpDir);
+    expect(ledger.status).toBe('IDLE');
+    expect(ledger.events.find((e) => e.metadata?.kind === 'PROCESS_OUTCOME')?.metadata).toMatchObject({ outcomeKind: 'exit', exitCode: 0 });
+  });
+
+  it('assigns different process identities to repeated resume invocations', async () => {
+    await runCommand(tmpDir, { agyBin: process.execPath, noTui: true, args: ['-e', 'process.exit(0)'] });
+    const sessionId = loadLedger(tmpDir).sessionId;
+    await runCommand(tmpDir, { agyBin: process.execPath, noTui: true, resume: true, args: ['-e', 'process.exit(0)'] });
+    await runCommand(tmpDir, { agyBin: process.execPath, noTui: true, resume: true, args: ['-e', 'process.exit(0)'] });
+    const ledger = loadLedger(tmpDir);
+    const runs = ledger.events.filter((event) => event.metadata?.kind === 'PROCESS_STARTED');
+    expect(ledger.sessionId).toBe(sessionId);
+    expect(new Set(runs.map((event) => event.metadata?.runId)).size).toBe(3);
+    expect(runs.every((event) => event.metadata?.sessionId === sessionId)).toBe(true);
   });
 
   it('streams live node-pty output through VirtualTerminal into TelemetryStore', async () => {
