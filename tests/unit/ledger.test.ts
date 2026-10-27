@@ -8,7 +8,9 @@ import {
   saveLedgerAtomic,
   appendLedgerEvent,
   getLedgerPath,
+  createWorkflowState,
 } from '../../src/core/ledger.js';
+import { createHash } from 'node:crypto';
 
 describe('Workspace Ledger', () => {
   const testDir = path.join(process.cwd(), 'tests/fixtures/test-ledger');
@@ -188,5 +190,71 @@ describe('Workspace Ledger', () => {
 
     const reloaded = loadLedger(testDir);
     expect(reloaded.status).toBe('COMPLETED');
+  });
+
+  it('migrates legacy ledgers additively while preserving historical status and events', () => {
+    const legacy = {
+      version: '1.0.0', sessionId: 'legacy-session', projectPath: path.resolve(testDir),
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      status: 'COMPLETED', activeAgent: null,
+      checkpoints: { spec: { status: 'APPROVED' }, plan: { status: 'PENDING' } },
+      events: [{ timestamp: '2026-01-01T00:00:00.000Z', level: 'INFO', message: 'legacy event' }],
+    };
+    fs.mkdirSync(path.dirname(getLedgerPath(testDir)), { recursive: true });
+    fs.writeFileSync(getLedgerPath(testDir), JSON.stringify(legacy));
+
+    const migrated = loadLedger(testDir);
+
+    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.status).toBe('COMPLETED');
+    expect(migrated.sessionId).toBe('legacy-session');
+    expect(migrated.events).toEqual(legacy.events);
+    expect(migrated.workflow).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(getLedgerPath(testDir), 'utf-8')).schemaVersion).toBe(2);
+  });
+
+  it('preserves unknown schema versions without overwriting or authorizing them', () => {
+    const unknown = { schemaVersion: 999, version: '99.0.0', status: 'COMPLETED', marker: 'diagnostic' };
+    fs.mkdirSync(path.dirname(getLedgerPath(testDir)), { recursive: true });
+    fs.writeFileSync(getLedgerPath(testDir), JSON.stringify(unknown));
+
+    expect(() => loadLedger(testDir)).toThrow(/unsupported.*schema/i);
+    expect(fs.readFileSync(getLedgerPath(testDir), 'utf-8')).toBe(JSON.stringify(unknown));
+
+    const unknownLegacy = { ...unknown, schemaVersion: undefined, version: '99.0.0' };
+    fs.writeFileSync(getLedgerPath(testDir), JSON.stringify(unknownLegacy));
+    expect(() => loadLedger(testDir)).toThrow(/unsupported.*schema/i);
+    expect(fs.readFileSync(getLedgerPath(testDir), 'utf-8')).toBe(JSON.stringify(unknownLegacy));
+  });
+
+  it('creates an immutable request snapshot whose hash survives workflow persistence', () => {
+    const ledger = initLedger(testDir);
+    const request = 'Implement the approved lifecycle.';
+    const workflow = createWorkflowState(testDir, request, { runId: 'run-fixed' });
+
+    expect(workflow.originalRequest.path).toBe(path.join('.agy', 'runs', 'run-fixed', 'request.txt'));
+    expect(workflow.originalRequest.revision).toBe(createHash('sha256').update(request).digest('hex'));
+    expect(fs.readFileSync(path.join(testDir, workflow.originalRequest.path), 'utf-8')).toBe(request);
+    expect(loadLedger(testDir).workflow).toEqual(workflow);
+    expect(() => createWorkflowState(testDir, 'changed request', { runId: 'run-fixed' })).toThrow(/immutable/i);
+    expect(fs.readFileSync(path.join(testDir, workflow.originalRequest.path), 'utf-8')).toBe(request);
+    expect(ledger.sessionId).toBe(loadLedger(testDir).sessionId);
+  });
+
+  it('retains approval history tied to artifact revisions', () => {
+    const ledger = initLedger(testDir);
+    ledger.workflow = {
+      schemaVersion: 1, runId: 'run-approval', workspaceRoot: testDir, phase: 'planning',
+      originalRequest: { path: '.agy/runs/run-approval/request.txt', revision: 'a'.repeat(64) },
+      decisionsPath: '.agy/runs/run-approval/decisions.jsonl', journalPath: '.agy/runs/run-approval/events.jsonl',
+      approvals: [
+        { actor: 'user', artifactKind: 'spec', revision: 'b'.repeat(64), decision: 'approved', recordedAt: '2026-01-01T00:00:00.000Z' },
+        { actor: 'user', artifactKind: 'spec', revision: 'c'.repeat(64), decision: 'rejected', recordedAt: '2026-01-02T00:00:00.000Z' },
+      ],
+    };
+    saveLedgerAtomic(testDir, ledger);
+
+    expect(loadLedger(testDir).workflow?.approvals).toHaveLength(2);
+    expect(loadLedger(testDir).workflow?.approvals?.map((approval) => approval.revision)).toEqual(['b'.repeat(64), 'c'.repeat(64)]);
   });
 });

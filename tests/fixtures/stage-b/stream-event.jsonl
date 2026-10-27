@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"synthetic-run-stream","sessionId":"synthetic-session","source":"synthetic-fixture","sequence":1,"receivedAt":"2026-10-25T00:00:00.000Z","kind":"observation","eventId":"synthetic-stream-1","payload":{"provenance":"synthetic fixture; not a Stage 0 capture","text":"sample event"}}
